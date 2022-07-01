@@ -514,7 +514,7 @@ vhost_user_reconnect_init(void)
 
 	ret = pthread_mutex_init(&reconn_list.mutex, NULL);
 	if (ret < 0) {
-		VHOST_LOG_CONFIG(ERR, "%s: failed to initialize mutex", __func__);
+		VHOST_LOG_CONFIG(ERR, "%s: failed to initialize mutex\n", __func__);
 		return ret;
 	}
 	TAILQ_INIT(&reconn_list.head);
@@ -522,9 +522,9 @@ vhost_user_reconnect_init(void)
 	ret = rte_ctrl_thread_create(&reconn_tid, "vhost_reconn", NULL,
 			     vhost_user_client_reconnect, NULL);
 	if (ret != 0) {
-		VHOST_LOG_CONFIG(ERR, "failed to create reconnect thread");
+		VHOST_LOG_CONFIG(ERR, "failed to create reconnect thread\n");
 		if (pthread_mutex_destroy(&reconn_list.mutex))
-			VHOST_LOG_CONFIG(ERR, "%s: failed to destroy reconnect mutex", __func__);
+			VHOST_LOG_CONFIG(ERR, "%s: failed to destroy reconnect mutex\n", __func__);
 	}
 
 	return ret;
@@ -1147,7 +1147,7 @@ rte_vhost_driver_start(const char *path)
 			"vhost-events", NULL, fdset_event_dispatch,
 			&vhost_user.fdset);
 		if (ret != 0) {
-			VHOST_LOG_CONFIG(ERR, "(%s) failed to create fdset handling thread", path);
+			VHOST_LOG_CONFIG(ERR, "(%s) failed to create fdset handling thread\n", path);
 
 			fdset_pipe_uninit(&vhost_user.fdset);
 			return -1;
