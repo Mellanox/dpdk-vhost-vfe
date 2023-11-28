@@ -294,8 +294,13 @@ int vdpa_with_socket_path_start(const char *vf_name,
 		return -1;
 	}
 	vports[vport_num].dev = dev;
-	if (start_vdpa(&vports[vport_num]))
+	if (start_vdpa(&vports[vport_num])) {
 		memset(&vports[vport_num], 0, sizeof(struct vdpa_port));
+		RTE_LOG(ERR, VDPA, "Unable to start vdpa device for %s.\n",
+		vf_name);
+		return -1;
+	}
+
 	return 0;
 }
 
