@@ -661,7 +661,7 @@ virtio_pci_dev_interrupts_num_get(struct virtio_pci_dev *vpdev)
 
 #define VFIO_FD_INVALID -1
 int
-virtio_pci_dev_interrupts_alloc(struct virtio_pci_dev *vpdev, int nvec)
+virtio_pci_dev_interrupts_alloc(struct virtio_pci_dev *vpdev, int nvec, int fds[])
 {
 	struct vfio_irq_set *irq_set;
 	int ret, i;
@@ -679,7 +679,7 @@ virtio_pci_dev_interrupts_alloc(struct virtio_pci_dev *vpdev, int nvec)
 	irq_set->start = 0;
 
 	for (i = 0; i < nvec; i++)
-		*((int *)&irq_set->data + i) = VFIO_FD_INVALID;
+		*((int *)&irq_set->data + i) = fds[i];
 
 	ret = ioctl(vpdev->vfio_dev_fd, VFIO_DEVICE_SET_IRQS, irq_set);
 	rte_free(irq_set);
@@ -728,34 +728,11 @@ virtio_pci_dev_state_interrupt_enable_only(struct virtio_pci_dev *vpdev, int vec
 }
 
 int
-virtio_pci_dev_state_interrupt_enable(struct virtio_pci_dev *vpdev, int fd, int vec, void *state)
+virtio_pci_dev_state_interrupt_enable(struct virtio_pci_dev *vpdev, int vec, void *state)
 {
 	struct virtio_hw *hw = &vpdev->hw;
-	struct vfio_irq_set *irq_set;
 	struct virtio_dev_queue_info *q_info;
 	struct virtio_dev_common_state *state_info;
-	int ret, *data;
-
-	irq_set = rte_zmalloc(NULL, (sizeof(struct vfio_irq_set) + sizeof(int)), 0);
-	if (irq_set == NULL) {
-		PMD_INIT_LOG(ERR, "Dev %s malloc fail", VP_DEV_NAME(vpdev));
-		return -ENOMEM;
-	}
-	irq_set->argsz = sizeof(struct vfio_irq_set) + sizeof(int);
-	irq_set->count = 1;
-	irq_set->flags = VFIO_IRQ_SET_DATA_EVENTFD |
-			 VFIO_IRQ_SET_ACTION_TRIGGER;
-	irq_set->index = VFIO_PCI_MSIX_IRQ_INDEX;
-	irq_set->start = vec;
-	data = (int *)&irq_set->data;
-	*data = fd;
-
-	ret = ioctl(vpdev->vfio_dev_fd, VFIO_DEVICE_SET_IRQS, irq_set);
-	rte_free(irq_set);
-	if (ret) {
-		PMD_INIT_LOG(ERR, "Dev %s enabling MSI-X: %s", VP_DEV_NAME(vpdev), strerror(errno));
-		return ret;
-	}
 
 	if (vec == 0) {
 		state_info = state;
@@ -771,31 +748,8 @@ int
 virtio_pci_dev_state_interrupt_disable(struct virtio_pci_dev *vpdev, int vec, void *state)
 {
 	struct virtio_hw *hw = &vpdev->hw;
-	struct vfio_irq_set *irq_set;
 	struct virtio_dev_queue_info *q_info;
 	struct virtio_dev_common_state *state_info;
-	int ret, *data;
-
-	irq_set = rte_zmalloc(NULL, (sizeof(struct vfio_irq_set) + sizeof(int)), 0);
-	if (irq_set == NULL) {
-		PMD_INIT_LOG(ERR, "Dev %s malloc fail", VP_DEV_NAME(vpdev));
-		return -ENOMEM;
-	}
-	irq_set->argsz = sizeof(struct vfio_irq_set) + sizeof(int);
-	irq_set->count = 1;
-	irq_set->flags = VFIO_IRQ_SET_DATA_EVENTFD |
-			 VFIO_IRQ_SET_ACTION_TRIGGER;
-	irq_set->index = VFIO_PCI_MSIX_IRQ_INDEX;
-	irq_set->start = vec;
-	data = (int *)&irq_set->data;
-	*data = VFIO_FD_INVALID;
-
-	ret = ioctl(vpdev->vfio_dev_fd, VFIO_DEVICE_SET_IRQS, irq_set);
-	rte_free(irq_set);
-	if (ret) {
-		PMD_INIT_LOG(ERR, "Dev %s disabling MSI-X: %s", VP_DEV_NAME(vpdev), strerror(errno));
-		return ret;
-	}
 
 	if (vec == 0) {
 		state_info = state;
@@ -809,9 +763,8 @@ virtio_pci_dev_state_interrupt_disable(struct virtio_pci_dev *vpdev, int vec, vo
 }
 
 int
-virtio_pci_dev_interrupt_enable(struct virtio_pci_dev *vpdev, int fd, int vec)
+virtio_pci_dev_interrupt_fd_set(struct virtio_pci_dev *vpdev, int fd, int vec)
 {
-	struct virtio_hw *hw = &vpdev->hw;
 	struct vfio_irq_set *irq_set;
 	int ret, *data;
 
@@ -832,16 +785,17 @@ virtio_pci_dev_interrupt_enable(struct virtio_pci_dev *vpdev, int fd, int vec)
 	ret = ioctl(vpdev->vfio_dev_fd, VFIO_DEVICE_SET_IRQS, irq_set);
 	rte_free(irq_set);
 	if (ret) {
-		PMD_INIT_LOG(ERR, "Dev %s enabling MSI-X: %s", VP_DEV_NAME(vpdev), strerror(errno));
+		PMD_INIT_LOG(ERR, "Dev %s set MSI-X fd: %s", VP_DEV_NAME(vpdev), strerror(errno));
 		return ret;
 	}
 
-	VIRTIO_OPS(hw)->intr_detect(hw);
-	if (vpdev->msix_status != VIRTIO_MSIX_ENABLED) {
-		PMD_INIT_LOG(ERR, "Dev %s MSI-X not enabled,status: %d",
-							VP_DEV_NAME(vpdev), vpdev->msix_status);
-		return -EINVAL;
-	}
+	return 0;
+}
+
+int
+virtio_pci_dev_interrupt_enable(struct virtio_pci_dev *vpdev, int vec)
+{
+	struct virtio_hw *hw = &vpdev->hw;
 
 	if (vec == 0) {
 		if (VIRTIO_OPS(hw)->set_config_irq(hw, 0) ==
@@ -861,29 +815,6 @@ int
 virtio_pci_dev_interrupt_disable(struct virtio_pci_dev *vpdev, int vec)
 {
 	struct virtio_hw *hw = &vpdev->hw;
-	struct vfio_irq_set *irq_set;
-	int ret, *data;
-
-	irq_set = rte_zmalloc(NULL, (sizeof(struct vfio_irq_set) + sizeof(int)), 0);
-	if (irq_set == NULL) {
-		PMD_INIT_LOG(ERR, "Dev %s malloc fail", VP_DEV_NAME(vpdev));
-		return -ENOMEM;
-	}
-	irq_set->argsz = sizeof(struct vfio_irq_set) + sizeof(int);
-	irq_set->count = 1;
-	irq_set->flags = VFIO_IRQ_SET_DATA_EVENTFD |
-			 VFIO_IRQ_SET_ACTION_TRIGGER;
-	irq_set->index = VFIO_PCI_MSIX_IRQ_INDEX;
-	irq_set->start = vec;
-	data = (int *)&irq_set->data;
-	*data = VFIO_FD_INVALID;
-
-	ret = ioctl(vpdev->vfio_dev_fd, VFIO_DEVICE_SET_IRQS, irq_set);
-	rte_free(irq_set);
-	if (ret) {
-		PMD_INIT_LOG(ERR, "Dev %s disabling MSI-X: %s", VP_DEV_NAME(vpdev), strerror(errno));
-		return ret;
-	}
 
 	if (vec == 0) {
 		if (VIRTIO_OPS(hw)->set_config_irq(hw, VIRTIO_MSI_NO_VECTOR) !=
