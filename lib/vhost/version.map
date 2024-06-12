@@ -88,6 +88,7 @@ EXPERIMENTAL {
 
 	# added in 22.03
 	rte_vhost_async_dma_configure;
+	rte_vhost_vring_call_nonblock;
 };
 
 INTERNAL {
