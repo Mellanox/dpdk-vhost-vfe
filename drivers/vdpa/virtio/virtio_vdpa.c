@@ -46,7 +46,7 @@ static int stage1 = 0;
 struct virtio_ha_vf_drv_ctx {
 	struct virtio_dev_name vf_name;
 	const struct vdpa_vf_ctx *ctx;
-	int vf_num_vm;
+	struct virtio_ha_vm_dev_ctx *vm_ctx;
 };
 
 extern struct virtio_vdpa_device_callback virtio_vdpa_blk_callback;
@@ -63,13 +63,13 @@ static pthread_mutex_t iommu_domain_locks[VIRTIO_VDPA_MAX_IOMMU_DOMAIN];
 static struct virtio_ha_vf_drv_ctx cached_ctx;
 
 static void
-virtio_ha_vf_drv_ctx_set(const struct virtio_dev_name *vf, const void *ctx, int vf_num_vm)
+virtio_ha_vf_drv_ctx_set(const struct virtio_dev_name *vf, const void *ctx, struct virtio_ha_vm_dev_ctx *vm_ctx)
 {
 	const struct vdpa_vf_ctx *vf_ctx = (const struct vdpa_vf_ctx *)ctx; 
 
 	memcpy(&cached_ctx.vf_name, vf, sizeof(struct virtio_dev_name));
 	cached_ctx.ctx = vf_ctx;
-	cached_ctx.vf_num_vm = vf_num_vm;
+	cached_ctx.vm_ctx = vm_ctx;
 }
 
 static void
@@ -79,7 +79,7 @@ virtio_ha_vf_drv_ctx_unset(const struct virtio_dev_name *vf)
 		return;
 	memset(&cached_ctx.vf_name, 0, sizeof(struct virtio_dev_name));
 	cached_ctx.ctx = NULL;
-	cached_ctx.vf_num_vm = 0;
+	cached_ctx.vm_ctx = NULL;
 }
 
 static struct virtio_vdpa_priv *
@@ -140,6 +140,7 @@ alloc_iommu_domain(void)
 	iommu_domain->container_ref_cnt = 0;
 	iommu_domain->mem_tbl_ref_cnt = 0;
 	iommu_domain->tbl_recover_cnt = 0;
+	iommu_domain->cont_recover_cnt = 0;
 	iommu_domain->vm_pid = -1;
 	virtio_iommu_domains[i] = iommu_domain;
 
@@ -2268,7 +2269,7 @@ virtio_vdpa_dev_do_remove(struct rte_pci_device *pci_dev, struct virtio_vdpa_pri
 	iommu_domain = virtio_iommu_domains[priv->iommu_idx];
 	if (iommu_domain) {
 		iommu_domain->container_ref_cnt--;
-		if (iommu_domain->container_ref_cnt == 0) {
+		if (iommu_domain->container_ref_cnt == 0 && iommu_domain->cont_recover_cnt == 0) {
 			if (priv->vfio_container_fd >= 0) {
 				rte_vfio_container_destroy(priv->vfio_container_fd);
 				priv->vfio_container_fd = -1;
@@ -2453,9 +2454,11 @@ virtio_vdpa_dev_probe(struct rte_pci_driver *pci_drv __rte_unused,
 				iommu_domain->mem.regions[i].size = mem->regions[i].size;
 			}
 			iommu_domain->mem.nregions = mem->nregions;
-			iommu_domain->tbl_recover_cnt = cached_ctx.vf_num_vm;
+			iommu_domain->tbl_recover_cnt = cached_ctx.vm_ctx->vm_tbl_vf;
+			iommu_domain->cont_recover_cnt = cached_ctx.vm_ctx->vm_vf;
 			iommu_domain->vm_pid = mem->vm_pid;
 		}
+		iommu_domain->cont_recover_cnt--;
 		pthread_mutex_unlock(&iommu_domain_locks[iommu_idx]);
 		if (cached_ctx.ctx->ctt.mem.nregions != 0)
 			priv->tbl_recovering = true;
