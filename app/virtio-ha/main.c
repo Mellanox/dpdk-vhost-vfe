@@ -1164,6 +1164,8 @@ main(__attribute__((__unused__)) int argc, __attribute__((__unused__)) char *arg
 	int sock, epfd, nev, i;
 	FILE *fp;
 
+	HA_APP_LOG(ERR, "version: %s", rte_version());
+
 	msg = virtio_ha_alloc_msg();
 	if (!msg) {
 		HA_APP_LOG(ERR, "Failed to alloc ha msg");
