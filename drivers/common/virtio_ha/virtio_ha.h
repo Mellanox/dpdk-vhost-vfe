@@ -92,12 +92,13 @@ struct vdpa_vf_with_devargs {
 };
 
 struct virtio_vdpa_mem_region {
-	uint64_t host_phys_addr;
+	uint64_t guest_user_addr;
 	uint64_t guest_phys_addr;
 	uint64_t size;
 };
 
 struct virtio_vdpa_dma_mem {
+	int vm_pid;
 	uint32_t nregions;
 	struct virtio_vdpa_mem_region regions[];
 };

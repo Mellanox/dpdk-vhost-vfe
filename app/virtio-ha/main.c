@@ -566,9 +566,10 @@ ha_server_store_dma_tbl(struct virtio_ha_msg *msg)
 				vf_dev->vf_devargs.mem_tbl_set = true;
 			else
 				vf_dev->vf_devargs.mem_tbl_set = false;
+			HA_APP_LOG(INFO, "DMA memory table belongs to VM PID %d:", mem->vm_pid);
 			for (i = 0; i < mem->nregions; i++) {
-				HA_APP_LOG(INFO, "Region %u: GPA 0x%" PRIx64 " HPA 0x%" PRIx64 " Size 0x%" PRIx64,
-					i, mem->regions[i].guest_phys_addr, mem->regions[i].host_phys_addr,
+				HA_APP_LOG(INFO, "Region %u: GPA 0x%" PRIx64 " QEMU_VA 0x%" PRIx64 " Size 0x%" PRIx64,
+					i, mem->regions[i].guest_phys_addr, mem->regions[i].guest_user_addr,
 					mem->regions[i].size);
 			}
 			break;
