@@ -509,50 +509,37 @@ static void*
 virtio_vdpa_dev_notifier(void *arg)
 {
 	int ret;
-	struct virtio_vdpa_notifier_work *work = arg;
+	struct virtio_vdpa_priv *priv = arg;
 	uint16_t nr_virtqs, i;
 
-	DRV_LOG(INFO, "%s vid %d dev notifier thread of vq id:%d start",
-			work->priv->vdev->device->name, work->priv->vid, work->vq_idx);
+	DRV_LOG(INFO, "%s vid %d dev notifier thread start",
+			priv->vdev->device->name, priv->vid);
 
-	ret = rte_vhost_host_notifier_ctrl(work->priv->vid, work->vq_idx, true);
+	ret = rte_vhost_host_notifier_ctrl(priv->vid, RTE_VHOST_QUEUE_ALL, true);
 	if (ret) {
-		DRV_LOG(ERR, "%s vid %d dev notifier thread failed use relay ret:%d vq id:%d",
-			work->priv->vdev->device->name, work->priv->vid, ret, work->vq_idx);
+		DRV_LOG(ERR, "%s vid %d dev notifier thread failed use relay ret:%d",
+			priv->vdev->device->name, priv->vid, ret);
 
-		if (work->vq_idx == RTE_VHOST_QUEUE_ALL) {
-			nr_virtqs = rte_vhost_get_vring_num(work->priv->vid);
-			i = 0;
-		} else {
-			i = work->vq_idx;
-			nr_virtqs = i + 1;
-		}
-		for(; i < nr_virtqs; i++) {
+		nr_virtqs = rte_vhost_get_vring_num(priv->vid);
+		for(i = 0; i < nr_virtqs; i++) {
 			pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
-			ret = virtio_vdpa_virtq_doorbell_relay_enable(work->priv, i);
+			ret = virtio_vdpa_virtq_doorbell_relay_enable(priv, i);
 			pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
 			if (ret) {
 				DRV_LOG(ERR, "%s vid %d dev notifier relay of vq id:%d setup fail",
-					work->priv->vdev->device->name, work->priv->vid, i);
+					priv->vdev->device->name, priv->vid, i);
 			}
 		}
 	}
-	DRV_LOG(INFO, "%s vid %d dev notifier work of vq id:%d finish",
-			work->priv->vdev->device->name, work->priv->vid, work->vq_idx);
+	DRV_LOG(INFO, "%s vid %d dev notifier work of finish",
+			priv->vdev->device->name, priv->vid);
 	/* Notify device anyway, in case loss doorbell */
-	if (work->vq_idx == RTE_VHOST_QUEUE_ALL) {
-		nr_virtqs = rte_vhost_get_vring_num(work->priv->vid);
-		i = 0;
-		for(; i < nr_virtqs; i++) {
-			virtio_pci_dev_queue_notify(work->priv->vpdev, i);
-			rte_vhost_vring_call(work->priv->vid, i);
-		}
-	} else {
-		virtio_pci_dev_queue_notify(work->priv->vpdev, work->vq_idx);
-		rte_vhost_vring_call(work->priv->vid, work->vq_idx);
+	nr_virtqs = rte_vhost_get_vring_num(priv->vid);
+	for(i = 0; i < nr_virtqs; i++) {
+		virtio_pci_dev_queue_notify(priv->vpdev, i);
+		rte_vhost_vring_call(priv->vid, i);
 	}
 
-	rte_free(work);
 	return NULL;
 }
 
@@ -1540,9 +1527,11 @@ virtio_vdpa_dev_close(int vid)
 		if (ret) {
 			DRV_LOG(ERR, "failed to cancel notify_ctrl thread: %s",rte_strerror(ret));
 		}
-		ret = pthread_join(priv->notify_tid, &status);
-		if (ret) {
-			DRV_LOG(ERR, "failed to join terminated notify_ctrl thread: %s", rte_strerror(ret));
+		if (!ret) {
+			ret = pthread_join(priv->notify_tid, &status);
+			if (ret) {
+				DRV_LOG(ERR, "failed to join terminated notify_ctrl thread: %s", rte_strerror(ret));
+			}
 		}
 		priv->is_notify_thread_started = false;
 	}
@@ -1619,7 +1608,6 @@ virtio_vdpa_dev_config(int vid)
 	struct rte_vdpa_device *vdev = rte_vhost_get_vdpa_device(vid);
 	struct virtio_vdpa_priv *priv =
 		virtio_vdpa_find_priv_resource_by_vdev(vdev);
-	struct virtio_vdpa_notifier_work *notify_work;
 	struct rte_vhost_vring vq;
 	int ret, i, vhost_sock_fd;
 	struct timeval start, end;
@@ -1729,23 +1717,13 @@ virtio_vdpa_dev_config(int vid)
 	priv->restore = false;
 	DRV_LOG(INFO, "%s vid %d move to driver ok", vdev->device->name, vid);
 
-	notify_work = rte_zmalloc(NULL, sizeof(*notify_work), 0);
-	if (!notify_work) {
-		DRV_LOG(ERR, "%s vfid %d failed to alloc notify thread", priv->vdev->device->name, priv->vf_id);
-		rte_errno = rte_errno ? rte_errno : ENOMEM;
-		return -rte_errno;
-	}
-
-	notify_work->priv = priv;
-	notify_work->vq_idx = RTE_VHOST_QUEUE_ALL;
 	DRV_LOG(INFO, "%s vfid %d launch all vq notifier thread",
 			priv->vdev->device->name, priv->vf_id);
 	priv->is_notify_thread_started = false;
-	ret = pthread_create(&priv->notify_tid, NULL,virtio_vdpa_dev_notifier, notify_work);
+	ret = pthread_create(&priv->notify_tid, NULL,virtio_vdpa_dev_notifier, priv);
 	if (ret) {
 		DRV_LOG(ERR, "%s vfid %d failed launch notifier thread ret:%d",
 				priv->vdev->device->name, priv->vf_id, ret);
-		rte_free(notify_work);
 		return -rte_errno;
 	}
 	priv->is_notify_thread_started = true;
