@@ -44,6 +44,7 @@ struct virtio_vdpa_vring_info {
 	uint64_t used;
 	uint16_t size;
 	uint16_t index;
+	int callfd;
 	uint8_t notifier_state;
 	bool enable;
 	bool conf_enable; /* save queue enable configuration got from vhost */

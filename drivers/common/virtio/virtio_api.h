@@ -94,19 +94,21 @@ int virtio_pci_dev_state_queue_set(struct virtio_pci_dev *vpdev, uint16_t qid, c
 __rte_internal
 void virtio_pci_dev_state_queue_del(struct virtio_pci_dev *vpdev, uint16_t qid, void *state);
 __rte_internal
-int virtio_pci_dev_state_interrupt_enable(struct virtio_pci_dev *vpdev, int fd, int vec, void *state);
+int virtio_pci_dev_state_interrupt_enable(struct virtio_pci_dev *vpdev, int vec, void *state);
 __rte_internal
 int virtio_pci_dev_state_interrupt_enable_only(struct virtio_pci_dev *vpdev, int vec, void *state);
 __rte_internal
 int virtio_pci_dev_state_interrupt_disable(struct virtio_pci_dev *vpdev, int vec, void *state);
 __rte_internal
-int virtio_pci_dev_interrupt_enable(struct virtio_pci_dev *vpdev, int fd, int vec);
+int virtio_pci_dev_interrupt_enable(struct virtio_pci_dev *vpdev, int vec);
+__rte_internal
+int virtio_pci_dev_interrupt_fd_set(struct virtio_pci_dev *vpdev, int fd, int vec);
 __rte_internal
 int virtio_pci_dev_interrupt_disable(struct virtio_pci_dev *vpdev, int vec);
 __rte_internal
 int virtio_pci_dev_interrupts_num_get(struct virtio_pci_dev *vpdev);
 __rte_internal
-int virtio_pci_dev_interrupts_alloc(struct virtio_pci_dev *vpdev, int nvec);
+int virtio_pci_dev_interrupts_alloc(struct virtio_pci_dev *vpdev, int nvec, int fds[]);
 __rte_internal
 int virtio_pci_dev_interrupts_free(struct virtio_pci_dev *vpdev);
 __rte_internal

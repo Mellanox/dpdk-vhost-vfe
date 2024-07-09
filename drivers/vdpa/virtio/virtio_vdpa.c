@@ -18,6 +18,7 @@
 #include <virtio_api.h>
 #include <virtio_lm.h>
 #include <virtio_util.h>
+#include <vhost.h>
 
 #include "rte_vf_rpc.h"
 #include "virtio_vdpa.h"
@@ -505,6 +506,46 @@ error:
 	return -EINVAL;
 }
 
+static void
+virtio_vdpa_dev_set_call_fd(struct virtio_vdpa_priv *priv)
+{
+	struct rte_vhost_vring vq;
+	uint16_t nr_virtqs, i;
+	int ret, *fds;
+
+	nr_virtqs = rte_vhost_get_vring_num(priv->vid);
+
+	fds = rte_zmalloc(NULL, (nr_virtqs + 1) * sizeof(*fds), 0 );
+	if (!fds) {
+		DRV_LOG(ERR, "Failed to alloc memory to set call fd vid:%d", priv->vid);
+		return;
+	}
+
+	if (priv->dev_ops->reg_dev_intr)
+		fds[0] = rte_intr_fd_get(priv->pdev->intr_handle);
+	else
+		fds[0] = VIRTIO_INVALID_EVENTFD;
+
+	for(i = 0; i < nr_virtqs; i++) {
+		fds[i+1] = VIRTIO_INVALID_EVENTFD;
+		priv->vrings[i]->callfd = VIRTIO_INVALID_EVENTFD;
+		ret = rte_vhost_get_vhost_vring(priv->vid, i, &vq);
+		if (ret) {
+			DRV_LOG(ERR, "vid %d virtq %d is invalid",priv->vid, i);
+			continue;
+		}
+		if (vq.callfd != VIRTIO_INVALID_EVENTFD) {
+			priv->vrings[i]->callfd = vq.callfd;
+			fds[i+1] = vq.callfd;
+		}
+	}
+
+	ret = virtio_pci_dev_interrupts_alloc(priv->vpdev, nr_virtqs, fds);
+	if (ret) {
+		DRV_LOG(ERR, "Failed to set call fd vid:%d", priv->vid);
+	}
+}
+
 static void*
 virtio_vdpa_dev_notifier(void *arg)
 {
@@ -650,14 +691,33 @@ virtio_vdpa_virtq_enable(struct virtio_vdpa_priv *priv, int vq_idx)
 		}
 
 		if (priv->configured) {
-			ret = virtio_pci_dev_interrupt_enable(priv->vpdev, vq.callfd, vq_idx + 1);
+
+			if (priv->vrings[vq_idx]->callfd != vq.callfd) {
+				ret = virtio_pci_dev_interrupt_fd_set(priv->vpdev, VIRTIO_INVALID_EVENTFD, vq_idx + 1);
+				if (ret) {
+					DRV_LOG(ERR, "error enabling virtio interrupts fd: %d(%s)",
+							ret, strerror(errno));
+					return ret;
+				}
+				ret = virtio_pci_dev_interrupt_fd_set(priv->vpdev, vq.callfd, vq_idx + 1);
+				if (ret) {
+					DRV_LOG(ERR, "error enabling virtio interrupts fd: %d(%s)",
+							ret, strerror(errno));
+					return ret;
+				}
+				DRV_LOG(INFO, "vid %d virtq %d pre fd:%d new fd:%d", vid, vq_idx,
+							priv->vrings[vq_idx]->callfd, vq.callfd);
+				priv->vrings[vq_idx]->callfd = vq.callfd;
+			}
+
+			ret = virtio_pci_dev_interrupt_enable(priv->vpdev, vq_idx + 1);
 			if (ret) {
 				DRV_LOG(ERR, "%s virtq interrupt enable failed ret:%d",
 								priv->vdev->device->name, ret);
 				return ret;
 			}
 		}
-		virtio_pci_dev_state_interrupt_enable(priv->vpdev, vq.callfd, vq_idx + 1, priv->state_mz->addr);
+		virtio_pci_dev_state_interrupt_enable(priv->vpdev, vq_idx + 1, priv->state_mz->addr);
 	} else {
 		DRV_LOG(DEBUG, "%s virtq %d call fd is -1, interrupt is disabled",
 						priv->vdev->device->name, vq_idx);
@@ -1598,7 +1658,11 @@ virtio_vdpa_dev_close(int vid)
 	virtio_pci_dev_state_dev_status_set(priv->state_mz->addr, VIRTIO_CONFIG_STATUS_ACK |
 													VIRTIO_CONFIG_STATUS_DRIVER);
 
-
+	ret = virtio_pci_dev_interrupts_free(priv->vpdev);
+	if (ret) {
+		DRV_LOG(ERR, "Error free virtio dev interrupts: %s",
+				strerror(errno));
+	}
 
 	virtio_vdpa_lcore_id = rte_get_next_lcore(virtio_vdpa_lcore_id, 1, 1);
 	priv->lcore_id = virtio_vdpa_lcore_id;
@@ -1654,6 +1718,8 @@ virtio_vdpa_dev_config(int vid)
 	if (priv->dev_work_flag == VIRTIO_VDPA_DEV_CLOSE_WORK_ERR) {
 		DRV_LOG(ERR, "%s is dev close work had err", vdev->device->name);
 	}
+
+	virtio_vdpa_dev_set_call_fd(priv);
 
 	nr_virtqs = rte_vhost_get_vring_num(vid);
 	if (priv->nvec < (nr_virtqs + 1)) {
@@ -2167,6 +2233,7 @@ virtio_vdpa_queues_alloc(struct virtio_vdpa_priv *priv)
 		priv->vrings[i] = vr;
 		priv->vrings[i]->index = i;
 		priv->vrings[i]->priv = priv;
+		priv->vrings[i]->callfd = VIRTIO_INVALID_EVENTFD;
 	}
 	return 0;
 }
@@ -2259,14 +2326,6 @@ virtio_vdpa_dev_do_remove(struct rte_pci_device *pci_dev, struct virtio_vdpa_pri
 	if (priv->vdev)
 		rte_vdpa_unregister_device(priv->vdev);
 
-	if (priv->vpdev) {
-		ret = virtio_pci_dev_interrupts_free(priv->vpdev);
-		if (ret) {
-			DRV_LOG(ERR, "Error free virtio dev interrupts: %s",
-					strerror(errno));
-		}
-	}
-
 	virtio_vdpa_queues_free(priv);
 
 	if (priv->vpdev) {
@@ -2336,7 +2395,7 @@ virtio_vdpa_dev_probe(struct rte_pci_driver *pci_drv __rte_unused,
 	static bool domain_init = false;
 	int vdpa = 0;
 	rte_uuid_t vm_uuid = {0};
-	int ret, fd, vf_id = 0, state_len, iommu_idx;
+	int ret, vf_id = 0, state_len, iommu_idx;
 	struct virtio_vdpa_priv *priv;
 	struct virtio_vdpa_iommu_domain *iommu_domain;
 	const struct virtio_vdpa_dma_mem *mem;
@@ -2645,17 +2704,6 @@ virtio_vdpa_dev_probe(struct rte_pci_driver *pci_drv __rte_unused,
 		virtio_vdpa_save_state(priv);
 	}
 
-	/* After restart from HA and interrupts alloc might cause traffic stop,
-	 * move to bottom AMAP to save downtime
-	 */
-	ret = virtio_pci_dev_interrupts_alloc(priv->vpdev, priv->nvec);
-	if (ret) {
-		DRV_LOG(ERR, "%s error alloc virtio dev interrupts ret:%d %s",
-					devname, ret, strerror(errno));
-		rte_errno = VFE_VDPA_ERR_ADD_VF_INTERRUPT_ALLOC;
-		goto error;
-	}
-
 	if (priv->dev_ops->reg_dev_intr) {
 		ret = priv->dev_ops->reg_dev_intr(priv);
 		if (ret) {
@@ -2664,8 +2712,7 @@ virtio_vdpa_dev_probe(struct rte_pci_driver *pci_drv __rte_unused,
 			goto error;
 		}
 
-		fd = rte_intr_fd_get(priv->pdev->intr_handle);
-		ret = virtio_pci_dev_interrupt_enable(priv->vpdev, fd, 0);
+		ret = virtio_pci_dev_interrupt_enable(priv->vpdev, 0);
 		if (ret) {
 			DRV_LOG(ERR, "%s error enabling virtio dev interrupts: %d(%s)",
 					devname, ret, strerror(errno));
