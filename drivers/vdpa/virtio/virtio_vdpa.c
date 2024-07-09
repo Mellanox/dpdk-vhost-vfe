@@ -1359,10 +1359,18 @@ virtio_vdpa_features_set(int vid)
 static int
 virtio_vdpa_dev_close_work(void *arg)
 {
-	int ret;
 	struct virtio_vdpa_priv *priv = arg;
+	void *status;
+	int ret;
 
 	DRV_LOG(INFO, "%s vfid %d dev close work of lcore:%d start", priv->vdev->device->name, priv->vf_id, priv->lcore_id);
+	if (priv->is_notify_thread_started) {
+		ret = pthread_join(priv->notify_tid, &status);
+		if (ret) {
+			DRV_LOG(ERR, "failed to join terminated notify_ctrl thread: %s", rte_strerror(ret));
+		}
+		priv->is_notify_thread_started = false;
+	}
 
 	ret = virtio_vdpa_cmd_restore_state(priv->pf_priv, priv->vf_id, 0, priv->state_size, priv->state_mz->iova);
 	if (ret) {
@@ -1525,18 +1533,10 @@ virtio_vdpa_dev_close(int vid)
 		vdev->device->name, start.tv_sec, start.tv_usec);
 
 	if (priv->is_notify_thread_started) {
-		void *status;
 		ret = pthread_cancel(priv->notify_tid);
 		if (ret) {
 			DRV_LOG(ERR, "failed to cancel notify_ctrl thread: %s",rte_strerror(ret));
 		}
-		if (!ret) {
-			ret = pthread_join(priv->notify_tid, &status);
-			if (ret) {
-				DRV_LOG(ERR, "failed to join terminated notify_ctrl thread: %s", rte_strerror(ret));
-			}
-		}
-		priv->is_notify_thread_started = false;
 	}
 
 	virtio_vdpa_doorbell_relay_disable(priv);
