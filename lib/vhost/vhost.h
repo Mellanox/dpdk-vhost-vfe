@@ -22,6 +22,7 @@
 #include <rte_dmadev.h>
 
 #include "rte_vhost.h"
+#include "fd_man.h"
 #include "vdpa_driver.h"
 
 #include "rte_vhost_async.h"
@@ -131,6 +132,8 @@ struct vhost_user_socket {
 	struct rte_vhost_device_ops const *notify_ops;
 	bool timeout_enabled;
 	struct timeval timestamp;
+
+	struct fdset fdset;
 };
 
 /**
