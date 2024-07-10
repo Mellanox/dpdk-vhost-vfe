@@ -174,7 +174,8 @@ async_dma_map(struct virtio_net *dev, bool do_map)
 					return;
 
 				/* DMA mapping errors won't stop VHOST_USER_SET_MEM_TABLE. */
-				VHOST_LOG_CONFIG(ERR, "DMA engine map failed\n");
+				VHOST_LOG_CONFIG(ERR, "(%s) DMA engine map failed\n",
+					dev->ifname);
 			}
 		}
 
@@ -190,7 +191,8 @@ async_dma_map(struct virtio_net *dev, bool do_map)
 				if (rte_errno == EINVAL)
 					return;
 
-				VHOST_LOG_CONFIG(ERR, "DMA engine unmap failed\n");
+				VHOST_LOG_CONFIG(ERR, "(%s) DMA engine unmap failed\n",
+					dev->ifname);
 			}
 		}
 	}
@@ -852,7 +854,8 @@ add_one_guest_page(struct virtio_net *dev, uint64_t guest_phys_addr,
 					dev->max_guest_pages * sizeof(*page),
 					RTE_CACHE_LINE_SIZE);
 		if (dev->guest_pages == NULL) {
-			VHOST_LOG_CONFIG(ERR, "cannot realloc guest_pages\n");
+			VHOST_LOG_CONFIG(ERR, "(%s) cannot realloc guest_pages\n",
+				dev->ifname);
 			rte_free(old_pages);
 			return -1;
 		}
@@ -1700,7 +1703,7 @@ static int vhost_user_set_vring_err(struct virtio_net **pdev,
 
 	if (!(ctx->msg.payload.u64 & VHOST_USER_VRING_NOFD_MASK))
 		close(ctx->fds[0]);
-	VHOST_LOG_CONFIG(INFO, "(%s) not implemented\n", dev->ifname);
+	VHOST_LOG_CONFIG(DEBUG, "(%s) not implemented\n", dev->ifname);
 
 	return RTE_VHOST_MSG_RESULT_OK;
 }
@@ -2052,7 +2055,9 @@ vhost_user_get_vring_base(struct virtio_net **pdev,
 
 	vhost_user_iotlb_flush_all(vq);
 
+	rte_spinlock_lock(&vq->access_lock);
 	vring_invalidate(dev, vq);
+	rte_spinlock_unlock(&vq->access_lock);
 
 	return RTE_VHOST_MSG_RESULT_REPLY;
 }
@@ -2240,7 +2245,7 @@ static int vhost_user_set_log_fd(struct virtio_net **pdev,
 		return RTE_VHOST_MSG_RESULT_ERR;
 
 	close(ctx->fds[0]);
-	VHOST_LOG_CONFIG(INFO, "(%s) not implemented.\n", dev->ifname);
+	VHOST_LOG_CONFIG(DEBUG, "(%s) not implemented.\n", dev->ifname);
 
 	return RTE_VHOST_MSG_RESULT_OK;
 }
@@ -2439,6 +2444,7 @@ vhost_user_iotlb_msg(struct virtio_net **pdev,
 			if (is_vring_iotlb(dev, vq, imsg)) {
 				rte_spinlock_lock(&vq->access_lock);
 				*pdev = dev = translate_ring_addresses(dev, i);
+				vq = dev->virtqueue[i];
 				rte_spinlock_unlock(&vq->access_lock);
 			}
 		}
@@ -2688,28 +2694,35 @@ read_vhost_message(struct virtio_net *dev, int sockfd, struct  vhu_msg_context *
 
 	ret = read_fd_message(dev->ifname, sockfd, (char *)&ctx->msg, VHOST_USER_HDR_SIZE,
 		ctx->fds, VHOST_MEMORY_MAX_NREGIONS, &ctx->fd_num);
-	if (ret <= 0) {
-		return ret;
-	} else if (ret != VHOST_USER_HDR_SIZE) {
+	if (ret <= 0)
+		goto out;
+
+	if (ret != VHOST_USER_HDR_SIZE) {
 		VHOST_LOG_CONFIG(ERR, "(%s) Unexpected header size read\n", dev->ifname);
-		close_msg_fds(ctx);
-		return -1;
+		ret = -1;
+		goto out;
 	}
 
 	if (ctx->msg.size) {
 		if (ctx->msg.size > sizeof(ctx->msg.payload)) {
 			VHOST_LOG_CONFIG(ERR, "(%s) invalid msg size: %d\n",
 					dev->ifname, ctx->msg.size);
-			return -1;
+			ret = -1;
+			goto out;
 		}
 		ret = read(sockfd, &ctx->msg.payload, ctx->msg.size);
 		if (ret <= 0)
-			return ret;
+			goto out;
 		if (ret != (int)ctx->msg.size) {
 			VHOST_LOG_CONFIG(ERR, "(%s) read control message failed\n", dev->ifname);
-			return -1;
+			ret = -1;
+			goto out;
 		}
 	}
+
+out:
+	if (ret <= 0)
+		close_msg_fds(ctx);
 
 	return ret;
 }
@@ -2865,7 +2878,6 @@ vhost_user_msg_handler(int vid, int fd)
 		return -1;
 	}
 
-	ret = 0;
 	request = ctx.msg.request.master;
 	if (request > VHOST_USER_NONE && request < VHOST_USER_MAX &&
 			vhost_message_str[request]) {
@@ -3002,9 +3014,11 @@ skip_to_post_handle:
 		send_vhost_reply(dev, fd, &ctx);
 	} else if (ret == RTE_VHOST_MSG_RESULT_ERR) {
 		VHOST_LOG_CONFIG(ERR, "(%s) vhost message handling failed.\n", dev->ifname);
-		return -1;
+		ret = -1;
+		goto unlock;
 	}
 
+	ret = 0;
 	for (i = 0; i < dev->nr_vring; i++) {
 		struct vhost_virtqueue *vq = dev->virtqueue[i];
 		bool cur_ready = vq_is_ready(dev, vq);
@@ -3015,10 +3029,11 @@ skip_to_post_handle:
 		}
 	}
 
+unlock:
 	if (unlock_required)
 		vhost_user_unlock_all_queue_pairs(dev);
 
-	if (!virtio_is_ready(dev))
+	if (ret != 0 || !virtio_is_ready(dev))
 		goto out;
 
 	/*
@@ -3045,7 +3060,7 @@ skip_to_post_handle:
 	}
 
 out:
-	return 0;
+	return ret;
 }
 
 static int process_slave_message_reply(struct virtio_net *dev,
