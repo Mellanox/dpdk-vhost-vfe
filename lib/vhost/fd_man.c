@@ -4,112 +4,129 @@
 
 #include <stdio.h>
 #include <unistd.h>
+#include <string.h>
+#include <sys/epoll.h>
 
 #include <rte_common.h>
 #include <rte_log.h>
+#include <rte_malloc.h>
+#include <rte_string_fns.h>
+#include <rte_thread.h>
 
 #include "fd_man.h"
 #include "vhost.h"
 #include "vdpa_driver.h"
 
-
 #define RTE_LOGTYPE_VHOST_FDMAN RTE_LOGTYPE_USER1
 
-#define FDPOLLERR (POLLERR | POLLHUP | POLLNVAL)
+static void *fdset_event_dispatch(void *arg);
 
-static int
-get_last_valid_idx(struct fdset *pfdset, int last_valid_idx)
+int
+fdset_init(struct fdset *fdset, const char *name)
 {
 	int i;
 
-	for (i = last_valid_idx; i >= 0 && pfdset->fd[i].fd == -1; i--)
-		;
+	rte_strscpy(fdset->name, name, PATH_MAX);
 
-	return i;
-}
+	pthread_mutex_init(&fdset->fd_mutex, NULL);
 
-static void
-fdset_move(struct fdset *pfdset, int dst, int src)
-{
-	pfdset->fd[dst]    = pfdset->fd[src];
-	pfdset->rwfds[dst] = pfdset->rwfds[src];
-}
-
-static void
-fdset_shrink_nolock(struct fdset *pfdset)
-{
-	int i;
-	int last_valid_idx = get_last_valid_idx(pfdset, pfdset->num - 1);
-
-	for (i = 0; i < last_valid_idx; i++) {
-		if (pfdset->fd[i].fd != -1)
-			continue;
-
-		fdset_move(pfdset, i, last_valid_idx);
-		last_valid_idx = get_last_valid_idx(pfdset, last_valid_idx - 1);
+	for (i = 0; i < (int)RTE_DIM(fdset->fd); i++) {
+		fdset->fd[i].fd = -1;
+		fdset->fd[i].dat = NULL;
 	}
-	pfdset->num = last_valid_idx + 1;
+	LIST_INIT(&fdset->fdlist);
+
+	/*
+	 * Any non-zero value would work (see man epoll_create),
+	 * but pass MAX_FDS for consistency.
+	 */
+	fdset->epfd = epoll_create(2);
+	if (fdset->epfd < 0) {
+		RTE_LOG(ERR, VHOST_FDMAN, "failed to create epoll for %s fdset\n", name);
+		goto err_free;
+	}
+
+	if (pthread_create(&fdset->tid, NULL, fdset_event_dispatch, fdset)) {
+		RTE_LOG(ERR, VHOST_FDMAN, "Failed to create %s event dispatch thread\n",
+				fdset->name);
+		goto err_epoll;
+	}
+
+	rte_thread_setname(fdset->tid, fdset->name);
+	return 0;
+
+err_epoll:
+	close(fdset->epfd);
+err_free:
+	rte_free(fdset);
+	return -1;
 }
 
-/*
- * Find deleted fd entries and remove them
- */
-static void
-fdset_shrink(struct fdset *pfdset)
+void
+fdset_destroy(struct fdset *fdset)
 {
-	pthread_mutex_lock(&pfdset->fd_mutex);
-	fdset_shrink_nolock(pfdset);
-	pthread_mutex_unlock(&pfdset->fd_mutex);
+	fdset->destroy = true;
+	pthread_cancel(fdset->tid);
+	pthread_join(fdset->tid, NULL);
+	close(fdset->epfd);
 }
 
-/**
- * Returns the index in the fdset for a given fd.
- * @return
- *   index for the fd, or -1 if fd isn't in the fdset.
- */
 static int
-fdset_find_fd(struct fdset *pfdset, int fd)
+fdset_insert_entry(struct fdset *pfdset, int fd, fd_cb rcb, fd_cb wcb, void *dat, bool check_timeout)
 {
-	int i;
+	struct fdentry *pfdentry;
 
-	for (i = 0; i < pfdset->num && pfdset->fd[i].fd != fd; i++)
-		;
+	if (pfdset->next_free_idx >= (int)RTE_DIM(pfdset->fd))
+		return -1;
 
-	return i == pfdset->num ? -1 : i;
-}
-
-static void
-fdset_add_fd(struct fdset *pfdset, int idx, int fd,
-	fd_cb rcb, fd_cb wcb, void *dat, bool check_timeout)
-{
-	struct fdentry *pfdentry = &pfdset->fd[idx];
-	struct pollfd *pfd = &pfdset->rwfds[idx];
-
+	pfdentry = &pfdset->fd[pfdset->next_free_idx];
 	pfdentry->fd  = fd;
 	pfdentry->rcb = rcb;
 	pfdentry->wcb = wcb;
 	pfdentry->dat = dat;
 	pfdentry->check_timeout = check_timeout;
 
-	pfd->fd = fd;
-	pfd->events  = rcb ? POLLIN : 0;
-	pfd->events |= wcb ? POLLOUT : 0;
-	pfd->revents = 0;
+	LIST_INSERT_HEAD(&pfdset->fdlist, pfdentry, next);
+
+	/* Find next free slot */
+	pfdset->next_free_idx++;
+	for (; pfdset->next_free_idx < (int)RTE_DIM(pfdset->fd); pfdset->next_free_idx++) {
+		if (pfdset->fd[pfdset->next_free_idx].fd != -1)
+			continue;
+		break;
+	}
+
+	return 0;
 }
 
-void
-fdset_init(struct fdset *pfdset)
+static void
+fdset_remove_entry(struct fdset *pfdset, struct fdentry *pfdentry)
 {
-	int i;
+	int entry_idx;
 
-	if (pfdset == NULL)
-		return;
+	pfdentry->fd = -1;
+	pfdentry->rcb = pfdentry->wcb = NULL;
+	pfdentry->dat = NULL;
 
-	for (i = 0; i < MAX_FDS; i++) {
-		pfdset->fd[i].fd = -1;
-		pfdset->fd[i].dat = NULL;
+	entry_idx = pfdentry - pfdset->fd;
+	if (entry_idx < pfdset->next_free_idx)
+		pfdset->next_free_idx = entry_idx;
+
+	LIST_REMOVE(pfdentry, next);
+}
+
+static struct fdentry *
+fdset_find_entry_locked(struct fdset *pfdset, int fd)
+{
+	struct fdentry *pfdentry;
+
+	LIST_FOREACH(pfdentry, &pfdset->fdlist, next) {
+		if (pfdentry->fd != fd)
+			continue;
+		return pfdentry;
 	}
-	pfdset->num = 0;
+
+	return NULL;
 }
 
 /**
@@ -118,59 +135,74 @@ fdset_init(struct fdset *pfdset)
 int
 fdset_add(struct fdset *pfdset, int fd, fd_cb rcb, fd_cb wcb, void *dat, bool check_timeout)
 {
-	int i;
+	struct epoll_event ev;
+	struct fdentry *pfdentry;
+	int ret = 0;
 
-	if (pfdset == NULL || fd == -1)
-		return -1;
-
-	pthread_mutex_lock(&pfdset->fd_mutex);
-	i = pfdset->num < MAX_FDS ? pfdset->num++ : -1;
-	if (i == -1) {
-		pthread_mutex_lock(&pfdset->fd_pooling_mutex);
-		fdset_shrink_nolock(pfdset);
-		pthread_mutex_unlock(&pfdset->fd_pooling_mutex);
-		i = pfdset->num < MAX_FDS ? pfdset->num++ : -1;
-		if (i == -1) {
-			pthread_mutex_unlock(&pfdset->fd_mutex);
-			return -2;
-		}
+	if (pfdset == NULL || fd == -1) {
+		ret = -1;
+		goto out;
 	}
 
-	fdset_add_fd(pfdset, i, fd, rcb, wcb, dat, check_timeout);
+	pthread_mutex_lock(&pfdset->fd_mutex);
+	ret = fdset_insert_entry(pfdset, fd, rcb, wcb, dat, check_timeout);
+	if (ret < 0) {
+		RTE_LOG(ERR, VHOST_FDMAN, "failed to insert fdset entry\n");
+		pthread_mutex_unlock(&pfdset->fd_mutex);
+		goto out;
+	}
 	pthread_mutex_unlock(&pfdset->fd_mutex);
 
+	ev.events = EPOLLERR;
+	ev.events |= rcb ? EPOLLIN : 0;
+	ev.events |= wcb ? EPOLLOUT : 0;
+	ev.data.fd = fd;
+
+	ret = epoll_ctl(pfdset->epfd, EPOLL_CTL_ADD, fd, &ev);
+	if (ret < 0) {
+		RTE_LOG(ERR, VHOST_FDMAN, "could not add %d fd to %d epfd: %s\n",
+			fd, pfdset->epfd, strerror(errno));
+		goto out_remove;
+	}
+
 	return 0;
+out_remove:
+	pthread_mutex_lock(&pfdset->fd_mutex);
+	pfdentry = fdset_find_entry_locked(pfdset, fd);
+	if (pfdentry)
+		fdset_remove_entry(pfdset, pfdentry);
+	pthread_mutex_unlock(&pfdset->fd_mutex);
+out:
+	return ret;
 }
 
-/**
- *  Unregister the fd from the fdset.
- *  Returns context of a given fd or NULL.
- */
-void *
+static void
+fdset_del_locked(struct fdset *pfdset, struct fdentry *pfdentry)
+{
+	if (epoll_ctl(pfdset->epfd, EPOLL_CTL_DEL, pfdentry->fd, NULL) == -1)
+		RTE_LOG(WARNING, VHOST_FDMAN, "could not remove %d fd from %d epfd: %s\n",
+			pfdentry->fd, pfdset->epfd, strerror(errno));
+
+	fdset_remove_entry(pfdset, pfdentry);
+}
+
+void
 fdset_del(struct fdset *pfdset, int fd)
 {
-	int i;
-	void *dat = NULL;
+	struct fdentry *pfdentry;
 
 	if (pfdset == NULL || fd == -1)
-		return NULL;
+		return;
 
 	do {
 		pthread_mutex_lock(&pfdset->fd_mutex);
-
-		i = fdset_find_fd(pfdset, fd);
-		if (i != -1 && pfdset->fd[i].busy == 0) {
-			/* busy indicates r/wcb is executing! */
-			dat = pfdset->fd[i].dat;
-			pfdset->fd[i].fd = -1;
-			pfdset->fd[i].rcb = pfdset->fd[i].wcb = NULL;
-			pfdset->fd[i].dat = NULL;
-			i = -1;
+		pfdentry = fdset_find_entry_locked(pfdset, fd);
+		if (pfdentry != NULL && pfdentry->busy == 0) {
+			fdset_del_locked(pfdset, pfdentry);
+			pfdentry = NULL;
 		}
 		pthread_mutex_unlock(&pfdset->fd_mutex);
-	} while (i != -1);
-
-	return dat;
+	} while (pfdentry != NULL);
 }
 
 /**
@@ -184,23 +216,20 @@ fdset_del(struct fdset *pfdset, int fd)
 int
 fdset_try_del(struct fdset *pfdset, int fd)
 {
-	int i;
+	struct fdentry *pfdentry;
 
 	if (pfdset == NULL || fd == -1)
 		return -2;
 
 	pthread_mutex_lock(&pfdset->fd_mutex);
-	i = fdset_find_fd(pfdset, fd);
-	if (i != -1 && pfdset->fd[i].busy) {
+	pfdentry = fdset_find_entry_locked(pfdset, fd);
+	if (pfdentry != NULL && pfdentry->busy != 0) {
 		pthread_mutex_unlock(&pfdset->fd_mutex);
 		return -1;
 	}
 
-	if (i != -1) {
-		pfdset->fd[i].fd = -1;
-		pfdset->fd[i].rcb = pfdset->fd[i].wcb = NULL;
-		pfdset->fd[i].dat = NULL;
-	}
+	if (pfdentry != NULL)
+		fdset_del_locked(pfdset, pfdentry);
 
 	pthread_mutex_unlock(&pfdset->fd_mutex);
 	return 0;
@@ -215,56 +244,37 @@ fdset_try_del(struct fdset *pfdset, int fd)
  * will wait until the flag is reset to zero(which indicates the callback is
  * finished), then it could free the context after fdset_del.
  */
-void *
+static void *
 fdset_event_dispatch(void *arg)
 {
 	int i;
-	struct pollfd *pfd;
-	struct fdentry *pfdentry;
-	struct rte_vdpa_device *vdpa_dev;
-	struct timeval time;
-	double time_passed;
-	struct vhost_user_socket *vsock;
 	fd_cb rcb, wcb;
 	void *dat;
 	int fd, numfds;
 	int remove1, remove2;
-	int need_shrink;
 	struct fdset *pfdset = arg;
-	int val;
+	struct rte_vdpa_device *vdpa_dev;
+	struct timeval time;
+	double time_passed;
+	struct vhost_user_socket *vsock;
 
 	if (pfdset == NULL)
 		return NULL;
 
 	while (1) {
+		struct epoll_event events[MAX_FDS];
+		struct fdentry *pfdentry;
 
-		/*
-		 * When poll is blocked, other threads might unregister
-		 * listenfds from and register new listenfds into fdset.
-		 * When poll returns, the entries for listenfds in the fdset
-		 * might have been updated. It is ok if there is unwanted call
-		 * for new listenfds.
-		 */
-		pthread_mutex_lock(&pfdset->fd_mutex);
-		numfds = pfdset->num;
-		pthread_mutex_unlock(&pfdset->fd_mutex);
-
-		pthread_mutex_lock(&pfdset->fd_pooling_mutex);
-		val = poll(pfdset->rwfds, numfds, 1000 /* millisecs */);
-		pthread_mutex_unlock(&pfdset->fd_pooling_mutex);
-		if (val < 0)
+		numfds = epoll_wait(pfdset->epfd, events, RTE_DIM(events), 1000);
+		if (numfds < 0)
 			continue;
 
-		need_shrink = 0;
 		for (i = 0; i < numfds; i++) {
 			pthread_mutex_lock(&pfdset->fd_mutex);
 
-			pfdentry = &pfdset->fd[i];
-			fd = pfdentry->fd;
-			pfd = &pfdset->rwfds[i];
-
-			if (fd < 0) {
-				need_shrink = 1;
+			fd = events[i].data.fd;
+			pfdentry = fdset_find_entry_locked(pfdset, fd);
+			if (pfdentry == NULL) {
 				pthread_mutex_unlock(&pfdset->fd_mutex);
 				continue;
 			}
@@ -286,17 +296,13 @@ fdset_event_dispatch(void *arg)
 				}
 			}
 
-			if (!pfd->revents) {
-				pthread_mutex_unlock(&pfdset->fd_mutex);
-				continue;
-			}
-
 			remove1 = remove2 = 0;
 
 			rcb = pfdentry->rcb;
 			wcb = pfdentry->wcb;
 			dat = pfdentry->dat;
 			pfdentry->busy = 1;
+
 			if (pfdentry->check_timeout) {
 				vsock = (struct vhost_user_socket *)pfdentry->dat;
 				vsock->timeout_enabled = false;
@@ -304,9 +310,9 @@ fdset_event_dispatch(void *arg)
 
 			pthread_mutex_unlock(&pfdset->fd_mutex);
 
-			if (rcb && pfd->revents & (POLLIN | FDPOLLERR))
+			if (rcb && events[i].events & (EPOLLIN | EPOLLERR | EPOLLHUP))
 				rcb(fd, dat, &remove1);
-			if (wcb && pfd->revents & (POLLOUT | FDPOLLERR))
+			if (wcb && events[i].events & (EPOLLOUT | EPOLLERR | EPOLLHUP))
 				wcb(fd, dat, &remove2);
 			pfdentry->busy = 0;
 			/*
@@ -315,82 +321,17 @@ fdset_event_dispatch(void *arg)
 			 * directly.
 			 */
 			/*
-			 * When we are to clean up the fd from fdset,
-			 * because the fd is closed in the cb,
-			 * the old fd val could be reused by when creates new
-			 * listen fd in another thread, we couldn't call
-			 * fdset_del.
+			 * A concurrent fdset_del may have been waiting for the
+			 * fdentry not to be busy, so we can't call
+			 * fdset_del_locked().
 			 */
-			if (remove1 || remove2) {
-				pfdentry->fd = -1;
-				need_shrink = 1;
-			}
+			if (remove1 || remove2)
+				fdset_del(pfdset, fd);
 		}
 
-		if (need_shrink)
-			fdset_shrink(pfdset);
+		if (pfdset->destroy)
+			break;
 	}
 
 	return NULL;
-}
-
-static void
-fdset_pipe_read_cb(int readfd, void *dat __rte_unused,
-		   int *remove __rte_unused)
-{
-	char charbuf[16];
-	int r = read(readfd, charbuf, sizeof(charbuf));
-	/*
-	 * Just an optimization, we don't care if read() failed
-	 * so ignore explicitly its return value to make the
-	 * compiler happy
-	 */
-	RTE_SET_USED(r);
-}
-
-void
-fdset_pipe_uninit(struct fdset *fdset)
-{
-	fdset_del(fdset, fdset->u.readfd);
-	close(fdset->u.readfd);
-	close(fdset->u.writefd);
-}
-
-int
-fdset_pipe_init(struct fdset *fdset)
-{
-	int ret;
-
-	if (pipe(fdset->u.pipefd) < 0) {
-		RTE_LOG(ERR, VHOST_FDMAN,
-			"failed to create pipe for vhost fdset\n");
-		return -1;
-	}
-
-	ret = fdset_add(fdset, fdset->u.readfd,
-			fdset_pipe_read_cb, NULL, NULL, false);
-
-	if (ret < 0) {
-		RTE_LOG(ERR, VHOST_FDMAN,
-			"failed to add pipe readfd %d into vhost server fdset\n",
-			fdset->u.readfd);
-
-		fdset_pipe_uninit(fdset);
-		return -1;
-	}
-
-	return 0;
-}
-
-void
-fdset_pipe_notify(struct fdset *fdset)
-{
-	int r = write(fdset->u.writefd, "1", 1);
-	/*
-	 * Just an optimization, we don't care if write() failed
-	 * so ignore explicitly its return value to make the
-	 * compiler happy
-	 */
-	RTE_SET_USED(r);
-
 }

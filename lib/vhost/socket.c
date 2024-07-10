@@ -33,7 +33,6 @@ struct vhost_user_connection {
 #define MAX_VHOST_SOCKET 2048
 struct vhost_user {
 	struct vhost_user_socket *vsockets[MAX_VHOST_SOCKET];
-	struct fdset fdset;
 	int vsocket_cnt;
 	pthread_mutex_t mutex;
 };
@@ -46,12 +45,6 @@ static int create_unix_socket(struct vhost_user_socket *vsocket);
 static int vhost_user_start_client(struct vhost_user_socket *vsocket);
 
 static struct vhost_user vhost_user = {
-	.fdset = {
-		.fd = { [0 ... MAX_FDS - 1] = {-1, NULL, NULL, NULL, 0} },
-		.fd_mutex = PTHREAD_MUTEX_INITIALIZER,
-		.fd_pooling_mutex = PTHREAD_MUTEX_INITIALIZER,
-		.num = 0
-	},
 	.vsocket_cnt = 0,
 	.mutex = PTHREAD_MUTEX_INITIALIZER,
 };
@@ -222,7 +215,7 @@ vhost_user_add_connection(int fd, struct vhost_user_socket *vsocket)
 	conn->connfd = fd;
 	conn->vsocket = vsocket;
 	conn->vid = vid;
-	ret = fdset_add(&vhost_user.fdset, fd, vhost_user_read_cb,
+	ret = fdset_add(&vsocket->fdset, fd, vhost_user_read_cb,
 			NULL, conn, false);
 	if (ret < 0) {
 		VHOST_LOG_CONFIG(ERR, "(%s) failed to add fd %d into vhost server fdset\n",
@@ -237,8 +230,6 @@ vhost_user_add_connection(int fd, struct vhost_user_socket *vsocket)
 	pthread_mutex_lock(&vsocket->conn_mutex);
 	TAILQ_INSERT_TAIL(&vsocket->conn_list, conn, next);
 	pthread_mutex_unlock(&vsocket->conn_mutex);
-
-	fdset_pipe_notify(&vhost_user.fdset);
 
 	gettimeofday(&start, NULL);
 	VHOST_LOG_CONFIG(INFO, "System time when connection established (%s): %lu.%06lu\n",
@@ -367,7 +358,7 @@ vhost_user_start_server(struct vhost_user_socket *vsocket)
 
 	vsocket->timeout_enabled = true;
 	gettimeofday(&vsocket->timestamp, NULL);
-	ret = fdset_add(&vhost_user.fdset, fd, vhost_user_server_new_connection,
+	ret = fdset_add(&vsocket->fdset, fd, vhost_user_server_new_connection,
 		  NULL, vsocket, true);
 	if (ret < 0) {
 		VHOST_LOG_CONFIG(ERR,
@@ -496,14 +487,14 @@ vhost_user_reconnect_init(void)
 	}
 	TAILQ_INIT(&reconn_list.head);
 
-	ret = rte_ctrl_thread_create(&reconn_tid, "vhost_reconn", NULL,
-			     vhost_user_client_reconnect, NULL);
+	ret = pthread_create(&reconn_tid, NULL, vhost_user_client_reconnect, NULL);
 	if (ret != 0) {
 		VHOST_LOG_CONFIG(ERR, "failed to create reconnect thread");
 		if (pthread_mutex_destroy(&reconn_list.mutex))
 			VHOST_LOG_CONFIG(ERR, "%s: failed to destroy reconnect mutex", __func__);
 	}
 
+	rte_thread_setname(reconn_tid, "vhost_reconn");
 	return ret;
 }
 
@@ -1020,7 +1011,7 @@ again:
 			 * mutex lock, and try again since the r/wcb
 			 * may use the mutex lock.
 			 */
-			if (fdset_try_del(&vhost_user.fdset, vsocket->socket_fd) == -1) {
+			if (fdset_try_del(&vsocket->fdset, vsocket->socket_fd) == -1) {
 				pthread_mutex_unlock(&vhost_user.mutex);
 				goto again;
 			}
@@ -1040,7 +1031,7 @@ again:
 			 * try again since the r/wcb may use the
 			 * conn_mutex and mutex locks.
 			 */
-			if (fdset_try_del(&vhost_user.fdset,
+			if (fdset_try_del(&vsocket->fdset,
 					  conn->connfd) == -1) {
 				pthread_mutex_unlock(&vsocket->conn_mutex);
 				pthread_mutex_unlock(&vhost_user.mutex);
@@ -1065,6 +1056,7 @@ again:
 		}
 
 		pthread_mutex_destroy(&vsocket->conn_mutex);
+		fdset_destroy(&vsocket->fdset);
 		vhost_user_socket_mem_free(vsocket);
 
 		count = --vhost_user.vsocket_cnt;
@@ -1112,7 +1104,6 @@ int
 rte_vhost_driver_start(const char *path)
 {
 	struct vhost_user_socket *vsocket;
-	static pthread_t fdset_tid;
 
 	pthread_mutex_lock(&vhost_user.mutex);
 	vsocket = find_vhost_user_socket(path);
@@ -1121,25 +1112,9 @@ rte_vhost_driver_start(const char *path)
 	if (!vsocket)
 		return -1;
 
-	if (fdset_tid == 0) {
-		/**
-		 * create a pipe which will be waited by poll and notified to
-		 * rebuild the wait list of poll.
-		 */
-		if (fdset_pipe_init(&vhost_user.fdset) < 0) {
-			VHOST_LOG_CONFIG(ERR, "(%s) failed to create pipe for vhost fdset\n", path);
-			return -1;
-		}
-
-		int ret = rte_ctrl_thread_create(&fdset_tid,
-			"vhost-events", NULL, fdset_event_dispatch,
-			&vhost_user.fdset);
-		if (ret != 0) {
-			VHOST_LOG_CONFIG(ERR, "(%s) failed to create fdset handling thread", path);
-
-			fdset_pipe_uninit(&vhost_user.fdset);
-			return -1;
-		}
+	if (fdset_init(&vsocket->fdset, path)) {
+		VHOST_LOG_CONFIG(ERR, "failed to init fdset for %s\n", path);
+		return -1;	
 	}
 
 	if (vsocket->is_server)

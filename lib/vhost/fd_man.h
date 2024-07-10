@@ -7,6 +7,7 @@
 #include <pthread.h>
 #include <poll.h>
 #include <sys/time.h>
+#include <sys/queue.h>
 
 #define MAX_FDS 2048
 
@@ -19,41 +20,29 @@ struct fdentry {
 	void *dat;	/* fd context */
 	int busy;	/* whether this entry is being used in cb. */
 	bool check_timeout; /* whether to check connection timeout */
+	LIST_ENTRY(fdentry) next;
 };
 
 struct fdset {
-	struct pollfd rwfds[MAX_FDS];
+	char name[PATH_MAX];
+	int epfd;
 	struct fdentry fd[MAX_FDS];
+	LIST_HEAD(, fdentry) fdlist;
+	int next_free_idx;
+	pthread_t tid;
 	pthread_mutex_t fd_mutex;
-	pthread_mutex_t fd_pooling_mutex;
-	int num;	/* current fd number of this fdset */
-
-	union pipefds {
-		struct {
-			int pipefd[2];
-		};
-		struct {
-			int readfd;
-			int writefd;
-		};
-	} u;
+	bool destroy;
 };
 
+int fdset_init(struct fdset *fdset, const char *name);
 
-void fdset_init(struct fdset *pfdset);
+void fdset_destroy(struct fdset *fdset);
 
 int fdset_add(struct fdset *pfdset, int fd,
 	fd_cb rcb, fd_cb wcb, void *dat, bool check_timeout);
 
-void *fdset_del(struct fdset *pfdset, int fd);
+void fdset_del(struct fdset *pfdset, int fd);
+
 int fdset_try_del(struct fdset *pfdset, int fd);
-
-void *fdset_event_dispatch(void *arg);
-
-int fdset_pipe_init(struct fdset *fdset);
-
-void fdset_pipe_uninit(struct fdset *fdset);
-
-void fdset_pipe_notify(struct fdset *fdset);
 
 #endif
