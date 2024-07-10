@@ -330,6 +330,7 @@ ha_server_app_query_vf_ctx(struct virtio_ha_msg *msg)
 			else
 				vf_ctt->vhost_fd_saved = true;
 			vf_ctt->mem.nregions = vf_dev->vf_ctx.ctt.mem.nregions;
+			vf_ctt->mem.vm_pid = vf_dev->vf_ctx.ctt.mem.vm_pid;
 			memcpy((void *)vf_ctt->mem.regions, vf_dev->vf_ctx.ctt.mem.regions,
 				vf_dev->vf_ctx.ctt.mem.nregions * sizeof(struct virtio_vdpa_mem_region));
 			msg->nr_fds = 3;
