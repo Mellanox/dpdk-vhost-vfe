@@ -221,15 +221,12 @@ err:
 
 extern int stage1;
 
-#define MAX_WAIT_ROUND 100 /* Max wait time = 100 * 50 = 5000 ms */
-#define WAIT_INTERVAL 50000 /* 50000 us = 50 ms */
 int
 virtio_ha_client_dev_restore_vf(int total_vf)
 {
 	struct virtio_ha_vf_to_restore *vf_dev;
 	struct vdpa_vf_ctx *vf_ctx = NULL;
-	struct vdpa_vf_params vf_info = {0};
-	int ret = 0, i;
+	int ret = 0;
 
 	while (total_vf > 0 && ret != -1) {
 		pthread_mutex_lock(&vf_restore_lock);
@@ -298,18 +295,6 @@ virtio_ha_client_dev_restore_vf(int total_vf)
 		}
 		pthread_mutex_unlock(&vf_restore_lock);
 		total_vf--;
-		if (vf_ctx->ctt.vhost_fd_saved) {
-			for (i = 0; i < MAX_WAIT_ROUND; i++) {
-				ret = rte_vdpa_get_vf_info(vf_dev->vf_devargs.vf_name.dev_bdf, &vf_info);
-				if (ret < 0) {
-					RTE_LOG(WARNING, HA, "Failed to get VF info\n");
-					continue;				
-				}
-				if (vf_info.configured)
-					break;
-				usleep(WAIT_INTERVAL);
-			}
-		}
 err_vf_ctx:
 		if (vf_ctx) {
 			free(vf_ctx);
@@ -320,7 +305,6 @@ err:
 			free(vf_dev);
 			vf_dev = NULL;
 		}
-		memset(&vf_info, 0, sizeof(struct vdpa_vf_params));
 	}
 
 	cleanup_restore_queue();
