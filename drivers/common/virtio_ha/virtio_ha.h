@@ -127,6 +127,7 @@ TAILQ_HEAD(virtio_ha_vf_dev_list, virtio_ha_vf_dev);
 struct virtio_ha_pf_dev {
 	TAILQ_ENTRY(virtio_ha_pf_dev) next;
 	struct virtio_ha_vf_dev_list vf_list;
+	pthread_mutex_t vf_lock;
 	uint32_t nr_vf;
 	struct virtio_dev_name pf_name;
 	struct virtio_pf_ctx pf_ctx;
@@ -136,6 +137,7 @@ TAILQ_HEAD(virtio_ha_pf_dev_list, virtio_ha_pf_dev);
 
 struct virtio_ha_device_list {
 	struct virtio_ha_pf_dev_list pf_list;
+	pthread_mutex_t pf_lock;
 	struct virtio_ha_global_dma_tbl dma_tbl;
 	uint32_t nr_pf;
 	int global_cfd;
