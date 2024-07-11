@@ -373,6 +373,7 @@ virtio_ha_ipc_client_init(ver_time_set set_ver)
 
 	TAILQ_INIT(&client_devs.pf_list);
 	TAILQ_INIT(&client_devs.dma_tbl);
+	pthread_mutex_init(&client_devs.pf_lock, NULL);
 	client_devs.nr_pf = 0;
 	client_devs.global_cfd = -1;
 	client_devs.prio_chnl_fd = -1;
@@ -644,9 +645,12 @@ alloc_pf_dev_to_list(const struct virtio_dev_name *pf)
 
 	memset(dev, 0, sizeof(struct virtio_ha_pf_dev));
 	TAILQ_INIT(&dev->vf_list);
+	pthread_mutex_init(&dev->vf_lock, NULL);
 	dev->nr_vf = 0;
 	memcpy(dev->pf_name.dev_bdf, pf->dev_bdf, PCI_PRI_STR_SIZE);
+	pthread_mutex_lock(&client_devs.pf_lock);
 	TAILQ_INSERT_TAIL(&client_devs.pf_list, dev, next);
+	pthread_mutex_unlock(&client_devs.pf_lock);
 
 	return dev;
 }
@@ -660,6 +664,7 @@ alloc_vf_dev_to_list(struct vdpa_vf_with_devargs *vf_dev, const struct virtio_de
 	size_t len;
 	bool found = false;
 
+	pthread_mutex_lock(&client_devs.pf_lock);
 	TAILQ_FOREACH(dev, &client_devs.pf_list, next) {
 		if (!strcmp(dev->pf_name.dev_bdf, pf->dev_bdf)) {
 			vf_list = &dev->vf_list;
@@ -667,6 +672,7 @@ alloc_vf_dev_to_list(struct vdpa_vf_with_devargs *vf_dev, const struct virtio_de
 			break;
 		}
 	}
+	pthread_mutex_unlock(&client_devs.pf_lock);
 
 	if (!found)
 		return NULL;
@@ -682,7 +688,9 @@ alloc_vf_dev_to_list(struct vdpa_vf_with_devargs *vf_dev, const struct virtio_de
 
 	memset(vf, 0, len);
 	memcpy(&vf->vf_devargs, vf_dev, sizeof(struct vdpa_vf_with_devargs));
+	pthread_mutex_lock(&dev->vf_lock);
 	TAILQ_INSERT_TAIL(vf_list, vf, next);
+	pthread_mutex_unlock(&dev->vf_lock);
 
 	return vf;
 }
@@ -853,6 +861,7 @@ virtio_ha_pf_ctx_query(const struct virtio_dev_name *pf, struct virtio_pf_ctx *c
 	ctx->vfio_group_fd = msg->fds[0];
 	ctx->vfio_device_fd = msg->fds[1];
 
+	pthread_mutex_lock(&client_devs.pf_lock);
 	TAILQ_FOREACH(dev, &client_devs.pf_list, next) {
 		if (!strcmp(dev->pf_name.dev_bdf, pf->dev_bdf)) {
 			dev->pf_ctx.vfio_group_fd = msg->fds[0];
@@ -860,6 +869,7 @@ virtio_ha_pf_ctx_query(const struct virtio_dev_name *pf, struct virtio_pf_ctx *c
 			break;
 		}
 	}
+	pthread_mutex_unlock(&client_devs.pf_lock);
 
 err_msg:
 	virtio_ha_free_msg(msg);
@@ -930,6 +940,7 @@ virtio_ha_vf_ctx_query(struct virtio_dev_name *vf,
 	(*ctx)->vfio_device_fd = msg->fds[2];
 	memcpy(&(*ctx)->ctt, msg->iov.iov_base, msg->iov.iov_len);
 
+	pthread_mutex_lock(&client_devs.pf_lock);
 	TAILQ_FOREACH(dev, &client_devs.pf_list, next) {
 		if (!strcmp(dev->pf_name.dev_bdf, pf->dev_bdf)) {
 			vf_list = &dev->vf_list;
@@ -937,10 +948,12 @@ virtio_ha_vf_ctx_query(struct virtio_dev_name *vf,
 			break;
 		}
 	}
+	pthread_mutex_unlock(&client_devs.pf_lock);	
 
 	if (!found)
 		goto out;
 
+	pthread_mutex_lock(&dev->vf_lock);
 	TAILQ_FOREACH(vf_dev, vf_list, next) {
 		if (!strcmp(vf_dev->vf_devargs.vf_name.dev_bdf, vf->dev_bdf)) {
 			vf_dev->vf_ctx.vfio_container_fd = msg->fds[0];
@@ -950,6 +963,7 @@ virtio_ha_vf_ctx_query(struct virtio_dev_name *vf,
 			break;
 		}
 	}
+	pthread_mutex_unlock(&dev->vf_lock);
 
 out:
 	free(msg->iov.iov_base);
@@ -1072,6 +1086,7 @@ virtio_ha_pf_ctx_remove(const struct virtio_dev_name *pf)
 	while (__atomic_load_n(&ipc_client_sync, __ATOMIC_RELAXED))
 		;
 
+	pthread_mutex_lock(&client_devs.pf_lock);
 	TAILQ_FOREACH(dev, &client_devs.pf_list, next) {
 		if (!strcmp(dev->pf_name.dev_bdf, pf->dev_bdf)) {
 			vf_list = &dev->vf_list;
@@ -1079,16 +1094,21 @@ virtio_ha_pf_ctx_remove(const struct virtio_dev_name *pf)
 			break;
 		}
 	}
+	pthread_mutex_unlock(&client_devs.pf_lock);
 
 	if (!found)
 		return -1;
 
 	if (vf_list) {
+		pthread_mutex_lock(&dev->vf_lock);
 		TAILQ_FOREACH(vf_dev, vf_list, next)
 			free(vf_dev);
+		pthread_mutex_unlock(&dev->vf_lock);
 	}
 
+	pthread_mutex_lock(&client_devs.pf_lock);
 	TAILQ_REMOVE(&client_devs.pf_list, dev, next);
+	pthread_mutex_unlock(&client_devs.pf_lock);
 	free(dev);
 
 	if (!__atomic_load_n(&ipc_client_connected, __ATOMIC_RELAXED)) {
@@ -1200,6 +1220,7 @@ virtio_ha_vf_devargs_fds_remove(struct virtio_dev_name *vf,
 	while (__atomic_load_n(&ipc_client_sync, __ATOMIC_RELAXED))
 		;
 
+	pthread_mutex_lock(&client_devs.pf_lock);
 	TAILQ_FOREACH(dev, &client_devs.pf_list, next) {
 		if (!strcmp(dev->pf_name.dev_bdf, pf->dev_bdf)) {
 			vf_list = &dev->vf_list;
@@ -1207,11 +1228,13 @@ virtio_ha_vf_devargs_fds_remove(struct virtio_dev_name *vf,
 			break;
 		}
 	}
+	pthread_mutex_unlock(&client_devs.pf_lock);
 
 	if (!found)
 		return -1;
 
 	found = false;
+	pthread_mutex_lock(&dev->vf_lock);
 	TAILQ_FOREACH(vf_dev, vf_list, next) {
 		if (!strcmp(vf_dev->vf_devargs.vf_name.dev_bdf, vf->dev_bdf)) {
 			found = true;
@@ -1223,6 +1246,7 @@ virtio_ha_vf_devargs_fds_remove(struct virtio_dev_name *vf,
 		TAILQ_REMOVE(vf_list, vf_dev, next);
 		free(vf_dev);
 	}
+	pthread_mutex_unlock(&dev->vf_lock);
 
 	if (!__atomic_load_n(&ipc_client_connected, __ATOMIC_RELAXED)) {
 		return 0;
@@ -1298,6 +1322,7 @@ virtio_ha_vf_vhost_fd_store(struct virtio_dev_name *vf,
 	while (__atomic_load_n(&ipc_client_sync, __ATOMIC_RELAXED))
 		;
 
+	pthread_mutex_lock(&client_devs.pf_lock);
 	TAILQ_FOREACH(dev, &client_devs.pf_list, next) {
 		if (!strcmp(dev->pf_name.dev_bdf, pf->dev_bdf)) {
 			vf_list = &dev->vf_list;
@@ -1305,16 +1330,19 @@ virtio_ha_vf_vhost_fd_store(struct virtio_dev_name *vf,
 			break;
 		}
 	}
+	pthread_mutex_unlock(&client_devs.pf_lock);
 
 	if (!found)
 		return -1;
 
+	pthread_mutex_lock(&dev->vf_lock);
 	TAILQ_FOREACH(vf_dev, vf_list, next) {
 		if (!strcmp(vf_dev->vf_devargs.vf_name.dev_bdf, vf->dev_bdf)) {
 			vf_dev->vhost_fd = fd;
 			break;
 		}
 	}
+	pthread_mutex_unlock(&dev->vf_lock);
 
 	if (!__atomic_load_n(&ipc_client_connected, __ATOMIC_RELAXED))
 		return 0;
@@ -1334,6 +1362,7 @@ virtio_ha_vf_vhost_fd_remove(struct virtio_dev_name *vf,
 	while (__atomic_load_n(&ipc_client_sync, __ATOMIC_RELAXED))
 		;
 
+	pthread_mutex_lock(&client_devs.pf_lock);
 	TAILQ_FOREACH(dev, &client_devs.pf_list, next) {
 		if (!strcmp(dev->pf_name.dev_bdf, pf->dev_bdf)) {
 			vf_list = &dev->vf_list;
@@ -1341,16 +1370,19 @@ virtio_ha_vf_vhost_fd_remove(struct virtio_dev_name *vf,
 			break;
 		}
 	}
+	pthread_mutex_unlock(&client_devs.pf_lock);
 
 	if (!found)
 		return -1;
 
+	pthread_mutex_lock(&dev->vf_lock);
 	TAILQ_FOREACH(vf_dev, vf_list, next) {
 		if (!strcmp(vf_dev->vf_devargs.vf_name.dev_bdf, vf->dev_bdf)) {
 			vf_dev->vhost_fd = -1;
 			break;
 		}
 	}
+	pthread_mutex_unlock(&dev->vf_lock);
 
 	if (!__atomic_load_n(&ipc_client_connected, __ATOMIC_RELAXED)) {
 		return 0;
@@ -1439,6 +1471,7 @@ virtio_ha_vf_mem_tbl_store(const struct virtio_dev_name *vf,
 	while (__atomic_load_n(&ipc_client_sync, __ATOMIC_RELAXED))
 		;
 
+	pthread_mutex_lock(&client_devs.pf_lock);
 	TAILQ_FOREACH(dev, &client_devs.pf_list, next) {
 		if (!strcmp(dev->pf_name.dev_bdf, pf->dev_bdf)) {
 			vf_list = &dev->vf_list;
@@ -1446,18 +1479,21 @@ virtio_ha_vf_mem_tbl_store(const struct virtio_dev_name *vf,
 			break;
 		}
 	}
+	pthread_mutex_unlock(&client_devs.pf_lock);
 
 	if (!found)
 		return -1;
 
 	len = sizeof(struct virtio_vdpa_dma_mem) +
 		mem->nregions * sizeof(struct virtio_vdpa_mem_region);
+	pthread_mutex_lock(&dev->vf_lock);
 	TAILQ_FOREACH(vf_dev, vf_list, next) {
 		if (!strcmp(vf_dev->vf_devargs.vf_name.dev_bdf, vf->dev_bdf)) {
 			memcpy(&vf_dev->vf_ctx.ctt.mem, mem, len);
 			break;
 		}
 	}
+	pthread_mutex_unlock(&dev->vf_lock);
 
 	if (mem->nregions > 0)
 		vf_dev->vf_devargs.mem_tbl_in_use = true;
@@ -1483,6 +1519,7 @@ virtio_ha_vf_mem_tbl_remove(struct virtio_dev_name *vf,
 	while (__atomic_load_n(&ipc_client_sync, __ATOMIC_RELAXED))
 		;
 
+	pthread_mutex_lock(&client_devs.pf_lock);
 	TAILQ_FOREACH(dev, &client_devs.pf_list, next) {
 		if (!strcmp(dev->pf_name.dev_bdf, pf->dev_bdf)) {
 			vf_list = &dev->vf_list;
@@ -1490,10 +1527,12 @@ virtio_ha_vf_mem_tbl_remove(struct virtio_dev_name *vf,
 			break;
 		}
 	}
+	pthread_mutex_unlock(&client_devs.pf_lock);
 
 	if (!found)
 		return -1;
 
+	pthread_mutex_lock(&dev->vf_lock);
 	TAILQ_FOREACH(vf_dev, vf_list, next) {
 		if (!strcmp(vf_dev->vf_devargs.vf_name.dev_bdf, vf->dev_bdf)) {
 			mem = &vf_dev->vf_ctx.ctt.mem;
@@ -1502,6 +1541,7 @@ virtio_ha_vf_mem_tbl_remove(struct virtio_dev_name *vf,
 			break;
 		}
 	}
+	pthread_mutex_unlock(&dev->vf_lock);
 
 	if (!__atomic_load_n(&ipc_client_connected, __ATOMIC_RELAXED)) {
 		return 0;
@@ -1766,6 +1806,7 @@ sync_dev_context_to_ha(ver_time_set set_ver)
 		}		
 	}	
 
+	pthread_mutex_lock(&client_devs.pf_lock);
 	TAILQ_FOREACH(dev, &client_devs.pf_list, next) {
 		ret = virtio_ha_pf_ctx_store_no_cache(&dev->pf_name, &dev->pf_ctx);
 		if (ret) {
@@ -1775,6 +1816,7 @@ sync_dev_context_to_ha(ver_time_set set_ver)
 
 		vf_list = &dev->vf_list;
 
+		pthread_mutex_lock(&dev->vf_lock);
 		TAILQ_FOREACH(vf_dev, vf_list, next) {
 			ret = virtio_ha_vf_devargs_fds_store_no_cache(&vf_dev->vf_devargs, &dev->pf_name,
 				vf_dev->vf_ctx.vfio_container_fd, vf_dev->vf_ctx.vfio_group_fd,
@@ -1802,7 +1844,9 @@ sync_dev_context_to_ha(ver_time_set set_ver)
 				}
 			}
 		}
+		pthread_mutex_unlock(&dev->vf_lock);
 	}
+	pthread_mutex_unlock(&client_devs.pf_lock);
 
 	virtio_ha_global_init_finish();
 }
