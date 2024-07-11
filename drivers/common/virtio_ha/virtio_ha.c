@@ -21,6 +21,7 @@ RTE_LOG_REGISTER(virtio_ha_ipc_logtype, pmd.vdpa.virtio, NOTICE);
 		"VIRTIO HA IPC %s(): " fmt "\n", __func__, ##args)
 
 static int ipc_client_sock;
+static pthread_mutex_t send_lock;
 static bool ipc_client_connected;
 static bool ipc_client_sync;
 static const struct virtio_ha_dev_ctx_cb *pf_ctx_cb;
@@ -213,6 +214,18 @@ virtio_ha_send_msg(int sockfd, struct virtio_ha_msg *msg)
 	return send_fd_message(sockfd, iov, nr_iov, msg->fds, msg->nr_fds, msg_sz);
 }
 
+static int
+virtio_ha_send_ipc_msg_with_lock(struct virtio_ha_msg *msg)
+{
+	int ret;
+
+	pthread_mutex_lock(&send_lock);
+	ret = virtio_ha_send_msg(ipc_client_sock, msg);
+	pthread_mutex_unlock(&send_lock);
+
+	return ret;
+}
+
 int
 virtio_ha_recv_msg(int sockfd, struct virtio_ha_msg *msg)
 {
@@ -337,7 +350,7 @@ virtio_ha_version_query(struct virtio_ha_version *ver)
 	}
 
 	msg->hdr.type = VIRTIO_HA_APP_QUERY_VERSION;
-	ret = virtio_ha_send_msg(ipc_client_sock, msg);
+	ret = virtio_ha_send_ipc_msg_with_lock(msg);
 	if (ret < 0) {
 		HA_IPC_LOG(ERR, "Failed to send msg");
 		ret = -1;
@@ -374,6 +387,7 @@ virtio_ha_ipc_client_init(ver_time_set set_ver)
 	TAILQ_INIT(&client_devs.pf_list);
 	TAILQ_INIT(&client_devs.dma_tbl);
 	pthread_mutex_init(&client_devs.pf_lock, NULL);
+	pthread_mutex_init(&send_lock, NULL);
 	client_devs.nr_pf = 0;
 	client_devs.global_cfd = -1;
 	client_devs.prio_chnl_fd = -1;
@@ -565,7 +579,7 @@ virtio_ha_prio_chnl_init(struct virtio_ha_vf_restore_queue *rq)
 	msg->hdr.type = VIRTIO_HA_APP_SET_PRIO_CHNL;
 	msg->nr_fds = 1;
 	msg->fds[0] = sv[1];
-	ret = virtio_ha_send_msg(ipc_client_sock, msg);
+	ret = virtio_ha_send_ipc_msg_with_lock(msg);
 	if (ret < 0) {
 		HA_IPC_LOG(ERR, "Failed to send msg");
 		ret = -1;
@@ -623,7 +637,7 @@ virtio_ha_prio_chnl_destroy(void)
 	}
 
 	msg->hdr.type = VIRTIO_HA_APP_REMOVE_PRIO_CHNL;
-	ret = virtio_ha_send_msg(ipc_client_sock, msg);
+	ret = virtio_ha_send_ipc_msg_with_lock(msg);
 	if (ret < 0)
 		HA_IPC_LOG(ERR, "Failed to send msg");
 
@@ -717,7 +731,7 @@ virtio_ha_pf_list_query(struct virtio_dev_name **list)
 	}
 
 	msg->hdr.type = VIRTIO_HA_APP_QUERY_PF_LIST;
-	ret = virtio_ha_send_msg(ipc_client_sock, msg);
+	ret = virtio_ha_send_ipc_msg_with_lock(msg);
 	if (ret < 0) {
 		HA_IPC_LOG(ERR, "Failed to send msg");
 		ret = -1;
@@ -778,7 +792,7 @@ virtio_ha_vf_list_query(const struct virtio_dev_name *pf,
 
 	msg->hdr.type = VIRTIO_HA_APP_QUERY_VF_LIST;
 	memcpy(msg->hdr.bdf, pf->dev_bdf, PCI_PRI_STR_SIZE);
-	ret = virtio_ha_send_msg(ipc_client_sock, msg);
+	ret = virtio_ha_send_ipc_msg_with_lock(msg);
 	if (ret < 0) {
 		HA_IPC_LOG(ERR, "Failed to send msg");
 		ret = -1;
@@ -838,7 +852,7 @@ virtio_ha_pf_ctx_query(const struct virtio_dev_name *pf, struct virtio_pf_ctx *c
 
 	msg->hdr.type = VIRTIO_HA_APP_QUERY_PF_CTX;
 	memcpy(msg->hdr.bdf, pf->dev_bdf, PCI_PRI_STR_SIZE);
-	ret = virtio_ha_send_msg(ipc_client_sock, msg);
+	ret = virtio_ha_send_ipc_msg_with_lock(msg);
 	if (ret < 0) {
 		HA_IPC_LOG(ERR, "Failed to send msg");
 		ret = -1;
@@ -905,7 +919,7 @@ virtio_ha_vf_ctx_query(struct virtio_dev_name *vf,
 	memcpy(msg->hdr.bdf, pf->dev_bdf, PCI_PRI_STR_SIZE);
 	msg->iov.iov_len = sizeof(struct virtio_dev_name);
 	msg->iov.iov_base = vf;
-	ret = virtio_ha_send_msg(ipc_client_sock, msg);
+	ret = virtio_ha_send_ipc_msg_with_lock(msg);
 	if (ret < 0) {
 		HA_IPC_LOG(ERR, "Failed to send msg");
 		ret = -1;
@@ -1040,7 +1054,7 @@ virtio_ha_pf_ctx_store_no_cache(const struct virtio_dev_name *pf, const struct v
 	msg->nr_fds = 2;
 	msg->fds[0] = ctx->vfio_group_fd;
 	msg->fds[1] = ctx->vfio_device_fd;
-	ret = virtio_ha_send_msg(ipc_client_sock, msg);
+	ret = virtio_ha_send_ipc_msg_with_lock(msg);
 	if (ret < 0) {
 		HA_IPC_LOG(ERR, "Failed to send msg");
 		virtio_ha_free_msg(msg);
@@ -1125,7 +1139,7 @@ virtio_ha_pf_ctx_remove(const struct virtio_dev_name *pf)
 
 		msg->hdr.type = VIRTIO_HA_PF_REMOVE_CTX;
 		memcpy(msg->hdr.bdf, pf->dev_bdf, PCI_PRI_STR_SIZE);
-		ret = virtio_ha_send_msg(ipc_client_sock, msg);
+		ret = virtio_ha_send_ipc_msg_with_lock(msg);
 		if (ret < 0) {
 			HA_IPC_LOG(ERR, "Failed to send msg");
 			virtio_ha_free_msg(msg);
@@ -1168,7 +1182,7 @@ virtio_ha_vf_devargs_fds_store_no_cache(struct vdpa_vf_with_devargs *vf_dev,
 	msg->fds[2] = vfio_device_fd;
 	msg->iov.iov_len = sizeof(struct vdpa_vf_with_devargs);
 	msg->iov.iov_base = vf_dev;
-	ret = virtio_ha_send_msg(ipc_client_sock, msg);
+	ret = virtio_ha_send_ipc_msg_with_lock(msg);
 	if (ret < 0) {
 		HA_IPC_LOG(ERR, "Failed to send msg");
 		virtio_ha_free_msg(msg);
@@ -1265,7 +1279,7 @@ virtio_ha_vf_devargs_fds_remove(struct virtio_dev_name *vf,
 		memcpy(msg->hdr.bdf, pf->dev_bdf, PCI_PRI_STR_SIZE);
 		msg->iov.iov_len = sizeof(struct virtio_dev_name);
 		msg->iov.iov_base = vf;
-		ret = virtio_ha_send_msg(ipc_client_sock, msg);
+		ret = virtio_ha_send_ipc_msg_with_lock(msg);
 		if (ret < 0) {
 			HA_IPC_LOG(ERR, "Failed to send msg");
 			virtio_ha_free_msg(msg);
@@ -1298,7 +1312,7 @@ virtio_ha_vf_vhost_fd_store_no_cache(struct virtio_dev_name *vf,
 	msg->fds[0] = fd;
 	msg->iov.iov_len = sizeof(struct virtio_dev_name);
 	msg->iov.iov_base = vf;
-	ret = virtio_ha_send_msg(ipc_client_sock, msg);
+	ret = virtio_ha_send_ipc_msg_with_lock(msg);
 	if (ret < 0) {
 		HA_IPC_LOG(ERR, "Failed to send msg");
 		virtio_ha_free_msg(msg);
@@ -1401,7 +1415,7 @@ virtio_ha_vf_vhost_fd_remove(struct virtio_dev_name *vf,
 		memcpy(msg->hdr.bdf, pf->dev_bdf, PCI_PRI_STR_SIZE);
 		msg->iov.iov_len = sizeof(struct virtio_dev_name);
 		msg->iov.iov_base = vf;
-		ret = virtio_ha_send_msg(ipc_client_sock, msg);
+		ret = virtio_ha_send_ipc_msg_with_lock(msg);
 		if (ret < 0) {
 			HA_IPC_LOG(ERR, "Failed to send msg");
 			virtio_ha_free_msg(msg);
@@ -1444,7 +1458,7 @@ virtio_ha_vf_mem_tbl_store_no_cache(const struct virtio_dev_name *vf,
 	vf_dev = (struct virtio_dev_name *)msg->iov.iov_base;
 	memcpy(vf_dev, vf, sizeof(struct virtio_dev_name));
 	memcpy(vf_dev + 1, mem, mem_len);
-	ret = virtio_ha_send_msg(ipc_client_sock, msg);
+	ret = virtio_ha_send_ipc_msg_with_lock(msg);
 	if (ret < 0) {
 		HA_IPC_LOG(ERR, "Failed to send msg");
 		free(msg->iov.iov_base);
@@ -1560,7 +1574,7 @@ virtio_ha_vf_mem_tbl_remove(struct virtio_dev_name *vf,
 		memcpy(msg->hdr.bdf, pf->dev_bdf, PCI_PRI_STR_SIZE);
 		msg->iov.iov_len = sizeof(struct virtio_dev_name);
 		msg->iov.iov_base = vf;
-		ret = virtio_ha_send_msg(ipc_client_sock, msg);
+		ret = virtio_ha_send_ipc_msg_with_lock(msg);
 		if (ret < 0) {
 			HA_IPC_LOG(ERR, "Failed to send msg");
 			virtio_ha_free_msg(msg);
@@ -1588,7 +1602,7 @@ virtio_ha_global_cfd_store_no_cache(int vfio_container_fd)
 	msg->hdr.type = VIRTIO_HA_GLOBAL_STORE_CONTAINER;
 	msg->fds[0] = vfio_container_fd;
 	msg->nr_fds = 1;
-	ret = virtio_ha_send_msg(ipc_client_sock, msg);
+	ret = virtio_ha_send_ipc_msg_with_lock(msg);
 	if (ret < 0) {
 		HA_IPC_LOG(ERR, "Failed to send msg");
 		virtio_ha_free_msg(msg);
@@ -1633,7 +1647,7 @@ virtio_ha_global_cfd_query(int *vfio_container_fd)
 	}
 
 	msg->hdr.type = VIRTIO_HA_GLOBAL_QUERY_CONTAINER;
-	ret = virtio_ha_send_msg(ipc_client_sock, msg);
+	ret = virtio_ha_send_ipc_msg_with_lock(msg);
 	if (ret < 0) {
 		HA_IPC_LOG(ERR, "Failed to send msg");
 		ret = -1;
@@ -1676,7 +1690,7 @@ virtio_ha_global_dma_map_no_cache(struct virtio_ha_global_dma_map *map, bool is_
 	msg->hdr.size = sizeof(struct virtio_ha_global_dma_map);
 	msg->iov.iov_len = sizeof(struct virtio_ha_global_dma_map);
 	msg->iov.iov_base = (void *)map;
-	ret = virtio_ha_send_msg(ipc_client_sock, msg);
+	ret = virtio_ha_send_ipc_msg_with_lock(msg);
 	if (ret < 0) {
 		HA_IPC_LOG(ERR, "Failed to send msg");
 		virtio_ha_free_msg(msg);
@@ -1763,7 +1777,7 @@ virtio_ha_global_init_finish(void)
 	}
 
 	msg->hdr.type = VIRTIO_HA_GLOBAL_INIT_FINISH;
-	ret = virtio_ha_send_msg(ipc_client_sock, msg);
+	ret = virtio_ha_send_ipc_msg_with_lock(msg);
 	if (ret < 0) {
 		HA_IPC_LOG(ERR, "Failed to send msg");
 		virtio_ha_free_msg(msg);
