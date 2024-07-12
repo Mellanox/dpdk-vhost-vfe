@@ -795,6 +795,7 @@ virtio_vdpa_destroy_aq_ctl(struct virtadmin_ctl *ctl)
 {
 	rte_memzone_free(ctl->mz);
 	rte_memzone_free(ctl->virtio_admin_hdr_mz);
+	rte_free(ctl->desc_list);
 }
 
 static int
@@ -866,8 +867,8 @@ virtio_vdpa_init_admin_queue(struct virtio_vdpa_pf_priv *priv)
 	avq = &vq->aq;
 	avq->mz = mz;
 
-	/* Allocate a page for admin vq command, data and status */
-	sz_hdr_mz = rte_mem_page_size();
+	/* Allocate 64 byte for 1 admin vq command */
+	sz_hdr_mz = ADMIN_CMD_HDR_MAX_SIZE * vq_size;
 
 	if (sz_hdr_mz) {
 		snprintf(vq_hdr_name, sizeof(vq_hdr_name), "vdev%d_aq%u_hdr",
@@ -885,11 +886,17 @@ virtio_vdpa_init_admin_queue(struct virtio_vdpa_pf_priv *priv)
 		}
 		avq->virtio_admin_hdr_mz = hdr_mz;
 		avq->virtio_admin_hdr_mem = hdr_mz->iova;
-		memset(avq->virtio_admin_hdr_mz->addr, 0, rte_mem_page_size());
+		memset(avq->virtio_admin_hdr_mz->addr, 0, sz_hdr_mz);
 	} else {
 		DRV_LOG(ERR, "rte mem page size is zero");
 		ret = -EINVAL;
 		goto err_free_mz;
+	}
+
+	avq->desc_list = rte_zmalloc(NULL, vq_size * sizeof(*avq->desc_list), 0);
+	if (!avq->desc_list) {
+		ret = -ENOMEM;
+		goto err_desc_mem;
 	}
 
 	hw->avq = avq;
@@ -908,6 +915,8 @@ virtio_vdpa_init_admin_queue(struct virtio_vdpa_pf_priv *priv)
 	return 0;
 
 err_clean_avq:
+	rte_free(avq->desc_list);
+err_desc_mem:
 	hw->avq = NULL;
 	rte_memzone_free(hdr_mz);
 err_free_mz:
