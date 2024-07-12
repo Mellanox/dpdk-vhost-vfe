@@ -69,4 +69,6 @@ rte_vdpa_pf_dev_remove(const char *pf_name);
 int
 rte_vdpa_get_pf_list(struct virtio_vdpa_pf_info *pf_info, int max_pf_num);
 
+#define ADMIN_CMD_HDR_MAX_SIZE 64
+
 #endif /* _VIRTIO_LM_H_ */

@@ -265,6 +265,9 @@ struct vq_desc_extra {
 #define virtnet_cq_to_vq(cvq) container_of(cvq, struct virtqueue, cq)
 #define virtnet_aq_to_vq(avq) container_of(avq, struct virtqueue, aq)
 #define virtnet_get_aq_hdr_addr(avq) (avq->virtio_admin_hdr_mz->addr)
+struct desc_state {
+	bool in_use;
+};
 
 struct virtqueue {
 	struct virtio_hw  *hw; /**< virtio_hw structure pointer. */
