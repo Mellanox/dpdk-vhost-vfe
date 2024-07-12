@@ -117,6 +117,7 @@ struct virtadmin_ctl {
 	uint16_t port_id;	       /**< Device port identifier. */
 	const struct rte_memzone *mz;   /**< mem zone to populate CTL ring. */
 	rte_spinlock_t lock;	    /**< spinlock for control queue. */
+	struct desc_state *desc_list;  /**< Desc meta data, used to get free desc */
 };
 
 struct virtio_hw {
