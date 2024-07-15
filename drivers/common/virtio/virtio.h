@@ -6,6 +6,7 @@
 #define _VIRTIO_H_
 #include "virtio_net.h"
 #include "virtio_blk.h"
+#include <semaphore.h>
 
 /*
  * Do we get callbacks when the ring is completely used,
@@ -114,10 +115,14 @@ struct virtadmin_ctl {
 	/**< memzone to populate hdr. */
 	const struct rte_memzone *virtio_admin_hdr_mz;
 	rte_iova_t virtio_admin_hdr_mem;/**< hdr for each xmit packet */
+	rte_iova_t virtio_admin_hdr_mem_base;/**< hdr for each xmit packet */
 	uint16_t port_id;	       /**< Device port identifier. */
 	const struct rte_memzone *mz;   /**< mem zone to populate CTL ring. */
 	rte_spinlock_t lock;	    /**< spinlock for control queue. */
 	struct desc_state *desc_list;  /**< Desc meta data, used to get free desc */
+	int vq_size;
+	sem_t poll_sem;
+	pthread_t poll_tid;
 };
 
 struct virtio_hw {

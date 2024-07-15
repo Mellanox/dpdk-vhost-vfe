@@ -267,6 +267,7 @@ struct vq_desc_extra {
 #define virtnet_get_aq_hdr_addr(avq) (avq->virtio_admin_hdr_mz->addr)
 struct desc_state {
 	bool in_use;
+	sem_t wait_sem;
 };
 
 struct virtqueue {
