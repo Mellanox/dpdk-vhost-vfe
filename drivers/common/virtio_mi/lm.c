@@ -16,6 +16,8 @@
 #include <rte_kvargs.h>
 #include <rte_eal_paging.h>
 #include <rte_ether.h>
+#include <semaphore.h>
+#include <sys/time.h>
 
 #include <virtqueue.h>
 #include <virtio_admin.h>
@@ -86,14 +88,121 @@ TAILQ_HEAD(virtio_vdpa_mi_privs, virtio_vdpa_pf_priv) virtio_mi_priv_list =
 static pthread_mutex_t mi_priv_list_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct virtio_ha_pf_drv_ctx cached_ctx;
 
-static struct virtio_admin_ctrl *
+static void
+virtio_vdpa_cmd_free_desc(struct virtio_hw *hw,uint16_t idx)
+{
+	struct virtqueue *vq;
+	struct timeval start;
+	uint16_t desc_idx;
+
+	vq = virtnet_aq_to_vq(hw->avq);
+
+	rte_spinlock_lock(&hw->avq->lock);
+
+	desc_idx = idx;
+	while (vq->vq_split.ring.desc[desc_idx].flags &
+	       VRING_DESC_F_NEXT) {
+		desc_idx = vq->vq_split.ring.desc[desc_idx].next;
+		vq->vq_free_cnt++;
+	}
+
+	vq->vq_split.ring.desc[desc_idx].next = vq->vq_desc_head_idx;
+	vq->vq_desc_head_idx = idx;
+
+	vq->vq_free_cnt++;
+
+	rte_spinlock_unlock(&hw->avq->lock);
+
+	gettimeofday(&start, NULL);
+	DRV_LOG(DEBUG, "vq->vq_free_cnt=%d\nvq->vq_desc_head_idx=%d time:%lu.%06lu",
+		vq->vq_free_cnt, vq->vq_desc_head_idx, start.tv_sec, start.tv_usec);
+
+}
+
+static int
+virtio_vdpa_mi_poll_thread_uninit(struct virtadmin_ctl *avq)
+{
+	int ret;
+	void *status;
+
+	ret = pthread_cancel(avq->poll_tid);
+	if (ret) {
+		DRV_LOG(ERR, "failed to cancel admin poll thread: %s",rte_strerror(ret));
+	}
+
+	ret = pthread_join(avq->poll_tid, &status);
+	if (ret) {
+		DRV_LOG(ERR, "failed to join terminated admin poll thread: %s", rte_strerror(ret));
+	}
+
+	ret = sem_destroy(&avq->poll_sem);
+	if (ret) {
+		DRV_LOG(ERR, "admin pool thread sem uninit failed");
+	}
+
+	return ret;
+}
+
+static void *
+virtio_vdpa_mi_poll(void *arg)
+{
+	struct virtadmin_ctl *avq = arg;
+	struct virtqueue *vq;
+	uint32_t idx, used_idx;
+	struct vring_used_elem *uep;
+
+	vq = virtnet_aq_to_vq(avq);
+
+	while(1){
+		sem_wait(&avq->poll_sem);
+		while (virtqueue_nused(vq) == 0) {
+			usleep(100);
+		}
+
+		used_idx = (uint32_t)(vq->vq_used_cons_idx
+				& (vq->vq_nentries - 1));
+		uep = &vq->vq_split.ring.used->ring[used_idx];
+		idx = (uint32_t) uep->id;
+		if (!avq->desc_list[idx].in_use) {
+			DRV_LOG(ERR, "desc:%d is not head", idx);
+		}
+		vq->vq_used_cons_idx++;
+		avq->desc_list[idx].in_use = false;
+		sem_post(&avq->desc_list[idx].wait_sem);
+	}
+
+	return NULL;
+}
+
+static int
+virtio_vdpa_mi_poll_thread_init(struct virtadmin_ctl *avq)
+{
+	int ret;
+
+	ret = sem_init(&avq->poll_sem, 0, 0);
+	if (ret < 0) {
+		DRV_LOG(ERR, "admin pool thread mutx init failed");
+		return ret;
+	}
+
+	ret = rte_ctrl_thread_create(&avq->poll_tid, "admin_poll", NULL,
+			     virtio_vdpa_mi_poll, avq);
+	if (ret != 0) {
+		DRV_LOG(ERR, "admin pool thread create failed");
+		if (sem_destroy(&avq->poll_sem))
+			DRV_LOG(ERR, "admin poll sem destroy failed");
+	}
+
+	return ret;
+}
+
+static uint16_t
 virtio_vdpa_send_admin_command_split(struct virtadmin_ctl *avq,
 		struct virtio_admin_ctrl *ctrl,
 		struct virtio_admin_data_ctrl *dat_ctrl,
 		int *dlen, int pkt_num)
 {
 	struct virtqueue *vq = virtnet_aq_to_vq(avq);
-	struct virtio_admin_ctrl *result;
 	uint32_t head, i;
 	int k, sum = 0;
 
@@ -148,41 +257,13 @@ virtio_vdpa_send_admin_command_split(struct virtadmin_ctl *avq,
 
 	vq_update_avail_ring(vq, head);
 	vq_update_avail_idx(vq);
+	avq->desc_list[head].in_use = true;
 
 	virtqueue_notify(vq);
+	rte_spinlock_unlock(&avq->lock);
+	sem_post(&avq->poll_sem);
 
-	while (virtqueue_nused(vq) == 0) {
-		usleep(100);
-	}
-
-	while (virtqueue_nused(vq)) {
-		uint32_t idx, desc_idx, used_idx;
-		struct vring_used_elem *uep;
-
-		used_idx = (uint32_t)(vq->vq_used_cons_idx
-				& (vq->vq_nentries - 1));
-		uep = &vq->vq_split.ring.used->ring[used_idx];
-		idx = (uint32_t) uep->id;
-		desc_idx = idx;
-
-		while (vq->vq_split.ring.desc[desc_idx].flags &
-		       VRING_DESC_F_NEXT) {
-			desc_idx = vq->vq_split.ring.desc[desc_idx].next;
-			vq->vq_free_cnt++;
-		}
-
-		vq->vq_split.ring.desc[desc_idx].next = vq->vq_desc_head_idx;
-		vq->vq_desc_head_idx = idx;
-
-		vq->vq_used_cons_idx++;
-		vq->vq_free_cnt++;
-	}
-
-	DRV_LOG(DEBUG, "vq->vq_free_cnt=%d\nvq->vq_desc_head_idx=%d",
-			vq->vq_free_cnt, vq->vq_desc_head_idx);
-
-	result = avq->virtio_admin_hdr_mz->addr;
-	return result;
+	return head;
 }
 
 static int
@@ -190,43 +271,73 @@ virtio_vdpa_send_admin_command(struct virtadmin_ctl *avq,
 		struct virtio_admin_ctrl *ctrl,
 		struct virtio_admin_data_ctrl *dat_ctrl,
 		int *dlen,
-		int pkt_num)
+		int pkt_num,
+		uint16_t *head)
 {
 	virtio_admin_ctrl_ack status = ~0;
-	struct virtio_admin_ctrl *result;
 	struct virtqueue *vq;
 	int i;
 
 	if (!avq) {
 		DRV_LOG(ERR, "Admin queue is not supported");
+		rte_spinlock_unlock(&avq->lock);
 		return -1;
 	}
 
 	ctrl->status = status;
 	vq = virtnet_aq_to_vq(avq);
 
-	DRV_LOG(DEBUG, "vq->vq_desc_head_idx = %d, status = %d, "
-		"vq->hw->avq = %p vq = %p",
-		vq->vq_desc_head_idx, status, vq->hw->avq, vq);
+	*head = virtio_vdpa_send_admin_command_split(avq, ctrl, dat_ctrl,
+		dlen, pkt_num);
 
-	if (vq->vq_free_cnt < pkt_num + 2) {
-		return -1;
-	}
-
-	for (i = 0; i < VIRTIO_ADMIN_CMD_RETRY_CNT; i++) {
-		result = virtio_vdpa_send_admin_command_split(avq, ctrl, dat_ctrl,
-			dlen, pkt_num);
-		if(result->status && (!(result->status & VIRTIO_ADMIN_CMD_STATUS_DNR_BIT))) {
-			DRV_LOG(INFO, "No:%d cmd status:0x%x, submit again after 1s", i, result->status);
+	for (i = 0;; i++) {
+		sem_wait(&avq->desc_list[*head].wait_sem);
+		if (i >= VIRTIO_ADMIN_CMD_RETRY_CNT)
+			break;
+		if(ctrl->status && (!(ctrl->status & VIRTIO_ADMIN_CMD_STATUS_DNR_BIT))) {
+			DRV_LOG(INFO, "No:%d cmd status:0x%x, submit again after 1s", i, ctrl->status);
 			usleep(1000000);
+			/* Kick again */
+			rte_spinlock_lock(&avq->lock);
+			avq->desc_list[*head].in_use = true;
+			vq_update_avail_ring(vq, *head);
+			vq_update_avail_idx(vq);
+
+			virtqueue_notify(vq);
+			rte_spinlock_unlock(&avq->lock);
+			sem_post(&avq->poll_sem);
 		}
 		else
 			break;
 	}
 
-	return result->status;
+	return ctrl->status;
 }
 
+static void virtio_vdpa_free_desc_check(struct virtadmin_ctl *avq, uint16_t free_cnt)
+{
+	struct virtqueue *vq;
+	struct timeval start;
+
+	vq = virtnet_aq_to_vq(avq);
+
+	do {
+		if (vq->vq_free_cnt < free_cnt) {
+			rte_spinlock_unlock(&avq->lock);
+			usleep(1000);
+			rte_spinlock_lock(&avq->lock);
+		} else {
+			avq->virtio_admin_hdr_mem = avq->virtio_admin_hdr_mem_base +
+						vq->vq_desc_head_idx * ADMIN_CMD_HDR_MAX_SIZE;
+			gettimeofday(&start, NULL);
+			DRV_LOG(DEBUG, "vq->vq_desc_head_idx = %d, vq_free_cnt = %d, "
+				"vq->hw->avq = %p vq = %p hdr=0x%lx time:%lu.%06lu",
+				vq->vq_desc_head_idx, vq->vq_free_cnt, avq, vq,
+				avq->virtio_admin_hdr_mem, start.tv_sec, start.tv_usec);
+			break;
+		}
+	} while(1);
+}
 int
 virtio_vdpa_cmd_identity(struct virtio_vdpa_pf_priv *priv,
 		struct virtio_admin_migration_identity_result *result)
@@ -235,6 +346,7 @@ virtio_vdpa_cmd_identity(struct virtio_vdpa_pf_priv *priv,
 	struct virtio_hw *hw = &priv->vpdev->hw;
 	struct virtio_admin_data_ctrl dat_ctrl;
 	struct virtio_admin_ctrl *ctrl;
+	uint16_t head;
 	int dlen[1];
 	int ret;
 
@@ -246,6 +358,8 @@ virtio_vdpa_cmd_identity(struct virtio_vdpa_pf_priv *priv,
 	}
 
 	rte_spinlock_lock(&hw->avq->lock);
+
+	virtio_vdpa_free_desc_check(hw->avq, 3);
 
 	ctrl = virtnet_get_aq_hdr_addr(hw->avq);
 	ctrl->hdr.class = VIRTIO_ADMIN_PCI_MIGRATION_CTRL;
@@ -258,10 +372,10 @@ virtio_vdpa_cmd_identity(struct virtio_vdpa_pf_priv *priv,
 				+ sizeof(ctrl->status);
 	dat_ctrl.out_data[0].len = sizeof(*result);
 
-	ret = virtio_vdpa_send_admin_command(hw->avq, ctrl, &dat_ctrl, dlen, 0);
+	ret = virtio_vdpa_send_admin_command(hw->avq, ctrl, &dat_ctrl, dlen, 0, &head);
 	if (ret) {
 		CMD_LOG(ERR, "Failed to run class %u, cmd %u, status %d", ctrl->hdr.class, ctrl->hdr.cmd, ret);
-		rte_spinlock_unlock(&hw->avq->lock);
+		virtio_vdpa_cmd_free_desc(hw, head);
 		return ret;
 	}
 
@@ -270,8 +384,8 @@ virtio_vdpa_cmd_identity(struct virtio_vdpa_pf_priv *priv,
 	result->major_ver = rte_le_to_cpu_16(res->major_ver);
 	result->minor_ver = rte_le_to_cpu_16(res->minor_ver);
 	result->ter_ver   = rte_le_to_cpu_16(res->ter_ver);
+	virtio_vdpa_cmd_free_desc(hw, head);
 
-	rte_spinlock_unlock(&hw->avq->lock);
 	return ret;
 }
 
@@ -284,6 +398,7 @@ virtio_vdpa_cmd_get_status(struct virtio_vdpa_pf_priv *priv, uint16_t vdev_id,
 	struct virtio_admin_data_ctrl dat_ctrl;
 	struct virtio_admin_ctrl *ctrl;
 	struct virtio_hw *hw;
+	uint16_t head;
 	int dlen[1];
 	int ret;
 
@@ -295,6 +410,7 @@ virtio_vdpa_cmd_get_status(struct virtio_vdpa_pf_priv *priv, uint16_t vdev_id,
 	}
 
 	rte_spinlock_lock(&hw->avq->lock);
+	virtio_vdpa_free_desc_check(hw->avq, 4);
 
 	ctrl = virtnet_get_aq_hdr_addr(hw->avq);
 	ctrl->hdr.class = VIRTIO_ADMIN_PCI_MIGRATION_CTRL;
@@ -308,11 +424,11 @@ virtio_vdpa_cmd_get_status(struct virtio_vdpa_pf_priv *priv, uint16_t vdev_id,
 			+ sizeof(struct virtio_admin_ctrl_hdr)
 			+ sizeof(ctrl->status) + dlen[0];
 	dat_ctrl.out_data[0].len = sizeof(*result);
-	ret = virtio_vdpa_send_admin_command(hw->avq, ctrl, &dat_ctrl, dlen, 1);
+	ret = virtio_vdpa_send_admin_command(hw->avq, ctrl, &dat_ctrl, dlen, 1, &head);
 	if (ret) {
 		CMD_LOG(ERR, "Failed to run class %u, cmd %u, status %d, vdev_id: %u",
 				ctrl->hdr.class, ctrl->hdr.cmd, ret, vdev_id);
-		rte_spinlock_unlock(&hw->avq->lock);
+		virtio_vdpa_cmd_free_desc(hw, head);
 		return ret;
 	}
 
@@ -322,7 +438,7 @@ virtio_vdpa_cmd_get_status(struct virtio_vdpa_pf_priv *priv, uint16_t vdev_id,
 	RTE_VERIFY(result->internal_status <= VIRTIO_S_FREEZED);
 	*status = (enum virtio_internal_status)result->internal_status;
 
-	rte_spinlock_unlock(&hw->avq->lock);
+	virtio_vdpa_cmd_free_desc(hw, head);
 	return 0;
 }
 
@@ -334,6 +450,7 @@ virtio_vdpa_cmd_set_status(struct virtio_vdpa_pf_priv *priv, uint16_t vdev_id,
 	struct virtio_admin_data_ctrl dat_ctrl;
 	struct virtio_admin_ctrl *ctrl;
 	struct virtio_hw *hw;
+	uint16_t head;
 	int dlen[1];
 	int ret;
 
@@ -345,6 +462,7 @@ virtio_vdpa_cmd_set_status(struct virtio_vdpa_pf_priv *priv, uint16_t vdev_id,
 	}
 
 	rte_spinlock_lock(&hw->avq->lock);
+	virtio_vdpa_free_desc_check(hw->avq, 3);
 
 	ctrl = virtnet_get_aq_hdr_addr(hw->avq);
 	ctrl->hdr.class = VIRTIO_ADMIN_PCI_MIGRATION_CTRL;
@@ -356,15 +474,15 @@ virtio_vdpa_cmd_set_status(struct virtio_vdpa_pf_priv *priv, uint16_t vdev_id,
 	dat_ctrl.num_in_data = 0;
 	dat_ctrl.num_out_data = 0;
 
-	ret = virtio_vdpa_send_admin_command(hw->avq, ctrl, &dat_ctrl, dlen, 1);
+	ret = virtio_vdpa_send_admin_command(hw->avq, ctrl, &dat_ctrl, dlen, 1, &head);
 	if (ret) {
 		CMD_LOG(ERR, "Failed to run class %u, cmd %u, status %d, vdev_id: %u",
 				ctrl->hdr.class, ctrl->hdr.cmd, ret, vdev_id);
-		rte_spinlock_unlock(&hw->avq->lock);
+		virtio_vdpa_cmd_free_desc(hw, head);
 		return ret;
 	}
 
-	rte_spinlock_unlock(&hw->avq->lock);
+	virtio_vdpa_cmd_free_desc(hw, head);
 	return 0;
 }
 
@@ -377,6 +495,7 @@ virtio_vdpa_cmd_save_state(struct virtio_vdpa_pf_priv *priv,
 	struct virtio_hw *hw = &priv->vpdev->hw;
 	struct virtio_admin_data_ctrl dat_ctrl;
 	struct virtio_admin_ctrl *ctrl;
+	uint16_t head;
 	int dlen[1];
 	int ret;
 
@@ -388,6 +507,7 @@ virtio_vdpa_cmd_save_state(struct virtio_vdpa_pf_priv *priv,
 	}
 
 	rte_spinlock_lock(&hw->avq->lock);
+	virtio_vdpa_free_desc_check(hw->avq, 4);
 
 	ctrl = virtnet_get_aq_hdr_addr(hw->avq);
 	ctrl->hdr.class = VIRTIO_ADMIN_PCI_MIGRATION_CTRL;
@@ -401,15 +521,15 @@ virtio_vdpa_cmd_save_state(struct virtio_vdpa_pf_priv *priv,
 	dat_ctrl.num_out_data = 1;
 	dat_ctrl.out_data[0].iova = out_data;
 	dat_ctrl.out_data[0].len = length;
-	ret = virtio_vdpa_send_admin_command(hw->avq, ctrl, &dat_ctrl, dlen, 1);
+	ret = virtio_vdpa_send_admin_command(hw->avq, ctrl, &dat_ctrl, dlen, 1, &head);
 	if (ret) {
 		CMD_LOG(ERR, "Failed to run class %u, cmd %u, status %d, vdev_id: %u",
 				ctrl->hdr.class, ctrl->hdr.cmd, ret, vdev_id);
-		rte_spinlock_unlock(&hw->avq->lock);
+		virtio_vdpa_cmd_free_desc(hw, head);
 		return ret;
 	}
 
-	rte_spinlock_unlock(&hw->avq->lock);
+	virtio_vdpa_cmd_free_desc(hw, head);
 	return 0;
 }
 
@@ -422,6 +542,7 @@ virtio_vdpa_cmd_restore_state(struct virtio_vdpa_pf_priv *priv,
 	struct virtio_hw *hw = &priv->vpdev->hw;
 	struct virtio_admin_data_ctrl dat_ctrl;
 	struct virtio_admin_ctrl *ctrl;
+	uint16_t head;
 	int dlen[1];
 	int ret;
 
@@ -433,6 +554,7 @@ virtio_vdpa_cmd_restore_state(struct virtio_vdpa_pf_priv *priv,
 	}
 
 	rte_spinlock_lock(&hw->avq->lock);
+	virtio_vdpa_free_desc_check(hw->avq, 4);
 
 	ctrl = virtnet_get_aq_hdr_addr(hw->avq);
 	ctrl->hdr.class = VIRTIO_ADMIN_PCI_MIGRATION_CTRL;
@@ -446,15 +568,15 @@ virtio_vdpa_cmd_restore_state(struct virtio_vdpa_pf_priv *priv,
 	dat_ctrl.in_data[0].iova = data;
 	dat_ctrl.in_data[0].len = length;
 	dat_ctrl.num_out_data = 0;
-	ret = virtio_vdpa_send_admin_command(hw->avq, ctrl, &dat_ctrl, dlen, 1);
+	ret = virtio_vdpa_send_admin_command(hw->avq, ctrl, &dat_ctrl, dlen, 1, &head);
 	if (ret) {
 		CMD_LOG(ERR, "Failed to run class %u, cmd %u, status %d, vdev_id: %u",
 				ctrl->hdr.class, ctrl->hdr.cmd, ret, vdev_id);
-		rte_spinlock_unlock(&hw->avq->lock);
+		virtio_vdpa_cmd_free_desc(hw, head);
 		return ret;
 	}
 
-	rte_spinlock_unlock(&hw->avq->lock);
+	virtio_vdpa_cmd_free_desc(hw, head);
 	return 0;
 }
 
@@ -468,6 +590,7 @@ virtio_vdpa_cmd_get_internal_pending_bytes(struct virtio_vdpa_pf_priv *priv,
 	struct virtio_hw *hw = &priv->vpdev->hw;
 	struct virtio_admin_data_ctrl dat_ctrl;
 	struct virtio_admin_ctrl *ctrl;
+	uint16_t head;
 	int dlen[1];
 	int ret;
 
@@ -479,6 +602,7 @@ virtio_vdpa_cmd_get_internal_pending_bytes(struct virtio_vdpa_pf_priv *priv,
 	}
 
 	rte_spinlock_lock(&hw->avq->lock);
+	virtio_vdpa_free_desc_check(hw->avq, 4);
 
 	ctrl = virtnet_get_aq_hdr_addr(hw->avq);
 	ctrl->hdr.class = VIRTIO_ADMIN_PCI_MIGRATION_CTRL;
@@ -493,11 +617,11 @@ virtio_vdpa_cmd_get_internal_pending_bytes(struct virtio_vdpa_pf_priv *priv,
 			+ sizeof(struct virtio_admin_ctrl_hdr)
 			+ sizeof(ctrl->status) + dlen[0];
 	dat_ctrl.out_data[0].len = sizeof(*result);
-	ret = virtio_vdpa_send_admin_command(hw->avq, ctrl, &dat_ctrl, dlen, 1);
+	ret = virtio_vdpa_send_admin_command(hw->avq, ctrl, &dat_ctrl, dlen, 1, &head);
 	if (ret) {
 		CMD_LOG(ERR, "Failed to run class %u, cmd %u, status %d, vdev_id: %u",
 				ctrl->hdr.class, ctrl->hdr.cmd, ret, vdev_id);
-		rte_spinlock_unlock(&hw->avq->lock);
+		virtio_vdpa_cmd_free_desc(hw, head);
 		return ret;
 	}
 
@@ -505,7 +629,7 @@ virtio_vdpa_cmd_get_internal_pending_bytes(struct virtio_vdpa_pf_priv *priv,
 			rte_mem_iova2virt(dat_ctrl.out_data[0].iova);
 	result->pending_bytes = rte_le_to_cpu_64(res->pending_bytes);
 
-	rte_spinlock_unlock(&hw->avq->lock);
+	virtio_vdpa_cmd_free_desc(hw, head);
 	return 0;
 }
 
@@ -517,6 +641,7 @@ virtio_vdpa_cmd_dirty_page_identity(struct virtio_vdpa_pf_priv *priv,
 	struct virtio_hw *hw = &priv->vpdev->hw;
 	struct virtio_admin_data_ctrl dat_ctrl;
 	struct virtio_admin_ctrl *ctrl;
+	uint16_t head;
 	int dlen[1];
 	int ret;
 
@@ -528,6 +653,7 @@ virtio_vdpa_cmd_dirty_page_identity(struct virtio_vdpa_pf_priv *priv,
 	}
 
 	rte_spinlock_lock(&hw->avq->lock);
+	virtio_vdpa_free_desc_check(hw->avq, 3);
 
 	ctrl = virtnet_get_aq_hdr_addr(hw->avq);
 	ctrl->hdr.class = VIRTIO_ADMIN_PCI_DIRTY_PAGE_TRACK_CTRL;
@@ -540,11 +666,11 @@ virtio_vdpa_cmd_dirty_page_identity(struct virtio_vdpa_pf_priv *priv,
 				+ sizeof(ctrl->status);
 	dat_ctrl.out_data[0].len = sizeof(*result);
 
-	ret = virtio_vdpa_send_admin_command(hw->avq, ctrl, &dat_ctrl, dlen, 0);
+	ret = virtio_vdpa_send_admin_command(hw->avq, ctrl, &dat_ctrl, dlen, 0, &head);
 	if (ret) {
 		CMD_LOG(ERR, "Failed to run class %u, cmd %u, status %d",
 				ctrl->hdr.class, ctrl->hdr.cmd, ret);
-		rte_spinlock_unlock(&hw->avq->lock);
+		virtio_vdpa_cmd_free_desc(hw, head);
 		return ret;
 	}
 
@@ -556,7 +682,7 @@ virtio_vdpa_cmd_dirty_page_identity(struct virtio_vdpa_pf_priv *priv,
 			rte_le_to_cpu_16(res->log_max_pages_track_pull_bytemap_mode);
 	result->max_track_ranges = rte_le_to_cpu_32(res->max_track_ranges);
 
-	rte_spinlock_unlock(&hw->avq->lock);
+	virtio_vdpa_cmd_free_desc(hw, head);
 	return 0;
 }
 
@@ -574,6 +700,7 @@ virtio_vdpa_cmd_dirty_page_start_track(struct virtio_vdpa_pf_priv *priv,
 	struct virtio_hw *hw = &priv->vpdev->hw;
 	struct virtio_admin_ctrl *ctrl;
 	struct virtio_admin_data_ctrl dat_ctrl;
+	uint16_t head;
 	int dlen[1];
 	int ret, i;
 
@@ -586,6 +713,7 @@ virtio_vdpa_cmd_dirty_page_start_track(struct virtio_vdpa_pf_priv *priv,
 	}
 
 	rte_spinlock_lock(&hw->avq->lock);
+	virtio_vdpa_free_desc_check(hw->avq, 3);
 
 	ctrl = virtnet_get_aq_hdr_addr(hw->avq);
 	ctrl->hdr.class = VIRTIO_ADMIN_PCI_DIRTY_PAGE_TRACK_CTRL;
@@ -605,15 +733,15 @@ virtio_vdpa_cmd_dirty_page_start_track(struct virtio_vdpa_pf_priv *priv,
 	dat_ctrl.num_out_data = 0;
 	dlen[0] = sizeof(*sd) + sizeof(struct virtio_sge) * num_sges;
 
-	ret = virtio_vdpa_send_admin_command(hw->avq, ctrl, &dat_ctrl, dlen, 1);
+	ret = virtio_vdpa_send_admin_command(hw->avq, ctrl, &dat_ctrl, dlen, 1, &head);
 	if (ret) {
 		CMD_LOG(ERR, "Failed to run class %u, cmd %u, status %d, vdev id: %u",
 				ctrl->hdr.class, ctrl->hdr.cmd, ret, vdev_id);
-		rte_spinlock_unlock(&hw->avq->lock);
+		virtio_vdpa_cmd_free_desc(hw, head);
 		return ret;
 	}
 
-	rte_spinlock_unlock(&hw->avq->lock);
+	virtio_vdpa_cmd_free_desc(hw, head);
 	return 0;
 }
 
@@ -625,6 +753,7 @@ virtio_vdpa_cmd_dirty_page_stop_track(struct virtio_vdpa_pf_priv *priv,
 	struct virtio_hw *hw = &priv->vpdev->hw;
 	struct virtio_admin_data_ctrl dat_ctrl;
 	struct virtio_admin_ctrl *ctrl;
+	uint16_t head;
 	int dlen[1];
 	int ret;
 
@@ -636,6 +765,7 @@ virtio_vdpa_cmd_dirty_page_stop_track(struct virtio_vdpa_pf_priv *priv,
 	}
 
 	rte_spinlock_lock(&hw->avq->lock);
+	virtio_vdpa_free_desc_check(hw->avq, 3);
 
 	ctrl = virtnet_get_aq_hdr_addr(hw->avq);
 	ctrl->hdr.class = VIRTIO_ADMIN_PCI_DIRTY_PAGE_TRACK_CTRL;
@@ -647,15 +777,15 @@ virtio_vdpa_cmd_dirty_page_stop_track(struct virtio_vdpa_pf_priv *priv,
 	dat_ctrl.num_in_data = 0;
 	dat_ctrl.num_out_data = 0;
 
-	ret = virtio_vdpa_send_admin_command(hw->avq, ctrl, &dat_ctrl, dlen, 1);
+	ret = virtio_vdpa_send_admin_command(hw->avq, ctrl, &dat_ctrl, dlen, 1, &head);
 	if (ret) {
 		CMD_LOG(ERR, "Failed to run class %u, cmd %u, status %d, vdev id: %u",
 				ctrl->hdr.class, ctrl->hdr.cmd, ret, vdev_id);
-		rte_spinlock_unlock(&hw->avq->lock);
+		virtio_vdpa_cmd_free_desc(hw, head);
 		return ret;
 	}
 
-	rte_spinlock_unlock(&hw->avq->lock);
+	virtio_vdpa_cmd_free_desc(hw, head);
 	return 0;
 }
 
@@ -671,6 +801,7 @@ virtio_vdpa_cmd_dirty_page_get_map_pending_bytes(
 	struct virtio_hw *hw = &priv->vpdev->hw;
 	struct virtio_admin_data_ctrl dat_ctrl;
 	struct virtio_admin_ctrl *ctrl;
+	uint16_t head;
 	int dlen[1];
 	int ret;
 
@@ -682,6 +813,7 @@ virtio_vdpa_cmd_dirty_page_get_map_pending_bytes(
 	}
 
 	rte_spinlock_lock(&hw->avq->lock);
+	virtio_vdpa_free_desc_check(hw->avq, 4);
 
 	ctrl = virtnet_get_aq_hdr_addr(hw->avq);
 	ctrl->hdr.class = VIRTIO_ADMIN_PCI_DIRTY_PAGE_TRACK_CTRL;
@@ -697,11 +829,11 @@ virtio_vdpa_cmd_dirty_page_get_map_pending_bytes(
 			+ sizeof(struct virtio_admin_ctrl_hdr)
 			+ sizeof(ctrl->status) + dlen[0];
 	dat_ctrl.out_data[0].len = sizeof(*result);
-	ret = virtio_vdpa_send_admin_command(hw->avq, ctrl, &dat_ctrl, dlen, 1);
+	ret = virtio_vdpa_send_admin_command(hw->avq, ctrl, &dat_ctrl, dlen, 1, &head);
 	if (ret) {
 		CMD_LOG(ERR, "Failed to run class %u, cmd %u, status %d, vdev_id: %u",
 				ctrl->hdr.class, ctrl->hdr.cmd, ret, vdev_id);
-		rte_spinlock_unlock(&hw->avq->lock);
+		virtio_vdpa_cmd_free_desc(hw, head);
 		return ret;
 	}
 
@@ -709,7 +841,7 @@ virtio_vdpa_cmd_dirty_page_get_map_pending_bytes(
 			rte_mem_iova2virt(dat_ctrl.out_data[0].iova);
 	result->pending_bytes = rte_le_to_cpu_64(res->pending_bytes);
 
-	rte_spinlock_unlock(&hw->avq->lock);
+	virtio_vdpa_cmd_free_desc(hw, head);
 	return 0;
 }
 
@@ -725,6 +857,7 @@ virtio_vdpa_cmd_dirty_page_report_map(struct virtio_vdpa_pf_priv *priv,
 	struct virtio_hw *hw = &priv->vpdev->hw;
 	struct virtio_admin_data_ctrl dat_ctrl;
 	struct virtio_admin_ctrl *ctrl;
+	uint16_t head;
 	int dlen[1];
 	int ret;
 
@@ -736,6 +869,7 @@ virtio_vdpa_cmd_dirty_page_report_map(struct virtio_vdpa_pf_priv *priv,
 	}
 
 	rte_spinlock_lock(&hw->avq->lock);
+	virtio_vdpa_free_desc_check(hw->avq, 4);
 
 	ctrl = virtnet_get_aq_hdr_addr(hw->avq);
 	ctrl->hdr.class = VIRTIO_ADMIN_PCI_DIRTY_PAGE_TRACK_CTRL;
@@ -751,15 +885,15 @@ virtio_vdpa_cmd_dirty_page_report_map(struct virtio_vdpa_pf_priv *priv,
 	dat_ctrl.out_data[0].iova = data;
 	dat_ctrl.out_data[0].len = length;
 
-	ret = virtio_vdpa_send_admin_command(hw->avq, ctrl, &dat_ctrl, dlen, 1);
+	ret = virtio_vdpa_send_admin_command(hw->avq, ctrl, &dat_ctrl, dlen, 1, &head);
 	if (ret) {
 		CMD_LOG(ERR, "Failed to run class %u, cmd %u, status %d, vdev id: %u",
 				ctrl->hdr.class, ctrl->hdr.cmd, ret, vdev_id);
-		rte_spinlock_unlock(&hw->avq->lock);
+		virtio_vdpa_cmd_free_desc(hw, head);
 		return ret;
 	}
 
-	rte_spinlock_unlock(&hw->avq->lock);
+	virtio_vdpa_cmd_free_desc(hw, head);
 	return 0;
 }
 
@@ -793,8 +927,17 @@ virtio_vdpa_init_vring(struct virtqueue *vq)
 static void
 virtio_vdpa_destroy_aq_ctl(struct virtadmin_ctl *ctl)
 {
+	int i, ret;
+	virtio_vdpa_mi_poll_thread_uninit(ctl);
 	rte_memzone_free(ctl->mz);
 	rte_memzone_free(ctl->virtio_admin_hdr_mz);
+	for(i = 0;i < ctl->vq_size;i++) {
+		ret = sem_destroy(&ctl->desc_list[i].wait_sem);
+		if (ret) {
+			DRV_LOG(ERR, "admin wait sem destroy failed %d", ret);
+		}
+	}
+
 	rte_free(ctl->desc_list);
 }
 
@@ -809,7 +952,7 @@ virtio_vdpa_init_admin_queue(struct virtio_vdpa_pf_priv *priv)
 	char vq_name[VIRTQUEUE_MAX_NAME_SZ];
 	struct virtio_hw *hw = &vpdev->hw;
 	struct virtadmin_ctl *avq = NULL;
-	unsigned int vq_size, size;
+	unsigned int vq_size, i, j, size;
 	struct virtqueue *vq;
 	size_t sz_hdr_mz = 0;
 	uint16_t queue_idx;
@@ -885,7 +1028,7 @@ virtio_vdpa_init_admin_queue(struct virtio_vdpa_pf_priv *priv)
 			}
 		}
 		avq->virtio_admin_hdr_mz = hdr_mz;
-		avq->virtio_admin_hdr_mem = hdr_mz->iova;
+		avq->virtio_admin_hdr_mem_base = hdr_mz->iova;
 		memset(avq->virtio_admin_hdr_mz->addr, 0, sz_hdr_mz);
 	} else {
 		DRV_LOG(ERR, "rte mem page size is zero");
@@ -897,6 +1040,15 @@ virtio_vdpa_init_admin_queue(struct virtio_vdpa_pf_priv *priv)
 	if (!avq->desc_list) {
 		ret = -ENOMEM;
 		goto err_desc_mem;
+	}
+	avq->vq_size = vq_size;
+
+	for(i = 0;i < vq_size;i++) {
+		ret = sem_init(&avq->desc_list[i].wait_sem, 0, 0);
+		if (ret < 0) {
+			DRV_LOG(ERR, "admin pool thread mutx init failed");
+			goto err_clean_avq;
+		}
 	}
 
 	hw->avq = avq;
@@ -912,9 +1064,20 @@ virtio_vdpa_init_admin_queue(struct virtio_vdpa_pf_priv *priv)
 		goto err_clean_avq;
 	}
 
+	ret = virtio_vdpa_mi_poll_thread_init(avq);
+	if (ret) {
+		DRV_LOG(ERR, "Failed to alloc admin poll thread");
+		ret = -VFE_VDPA_ERR_ADD_PF_ALLOC_ADMIN_QUEUE;
+		goto err_clean_avq;
+	}
+
 	return 0;
 
 err_clean_avq:
+	for(j = 0;j < i;j++) {
+		sem_destroy(&avq->desc_list[j].wait_sem);
+	}
+
 	rte_free(avq->desc_list);
 err_desc_mem:
 	hw->avq = NULL;
