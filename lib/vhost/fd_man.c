@@ -129,6 +129,21 @@ fdset_find_entry_locked(struct fdset *pfdset, int fd)
 	return NULL;
 }
 
+static bool
+fdset_exist_dup_fd(struct fdset *pfdset, int fd)
+{
+	struct fdentry *pfdentry;
+	int count = 0;
+
+	LIST_FOREACH(pfdentry, &pfdset->fdlist, next) {
+		if (pfdentry->fd != fd)
+			continue;
+		count++;
+	}
+
+	return count > 1 ? true : false;
+}
+
 /**
  * Register the fd in the fdset with read/write handler and context.
  */
@@ -179,24 +194,25 @@ out:
 static void
 fdset_del_locked(struct fdset *pfdset, struct fdentry *pfdentry)
 {
-	if (epoll_ctl(pfdset->epfd, EPOLL_CTL_DEL, pfdentry->fd, NULL) == -1)
-		RTE_LOG(WARNING, VHOST_FDMAN, "could not remove %d fd from %d epfd: %s\n",
-			pfdentry->fd, pfdset->epfd, strerror(errno));
+	if (fdset_exist_dup_fd(pfdset, pfdentry->fd)) {
+		RTE_LOG(WARNING, VHOST_FDMAN, "Duplicate fd %d exists, skip epoll_ctl delete\n", pfdentry->fd);
+	} else {
+		if (epoll_ctl(pfdset->epfd, EPOLL_CTL_DEL, pfdentry->fd, NULL) == -1)
+			RTE_LOG(WARNING, VHOST_FDMAN, "could not remove %d fd from %d epfd: %s\n",
+				pfdentry->fd, pfdset->epfd, strerror(errno));
+	}
 
 	fdset_remove_entry(pfdset, pfdentry);
 }
 
 void
-fdset_del(struct fdset *pfdset, int fd)
+fdset_del(struct fdset *pfdset, struct fdentry *pfdentry)
 {
-	struct fdentry *pfdentry;
-
-	if (pfdset == NULL || fd == -1)
+	if (pfdset == NULL || pfdentry == NULL)
 		return;
 
 	do {
 		pthread_mutex_lock(&pfdset->fd_mutex);
-		pfdentry = fdset_find_entry_locked(pfdset, fd);
 		if (pfdentry != NULL && pfdentry->busy == 0) {
 			fdset_del_locked(pfdset, pfdentry);
 			pfdentry = NULL;
@@ -326,7 +342,7 @@ fdset_event_dispatch(void *arg)
 			 * fdset_del_locked().
 			 */
 			if (remove1 || remove2)
-				fdset_del(pfdset, fd);
+				fdset_del(pfdset, pfdentry);
 		}
 
 		if (pfdset->destroy)

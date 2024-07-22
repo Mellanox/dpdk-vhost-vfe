@@ -41,7 +41,7 @@ void fdset_destroy(struct fdset *fdset);
 int fdset_add(struct fdset *pfdset, int fd,
 	fd_cb rcb, fd_cb wcb, void *dat, bool check_timeout);
 
-void fdset_del(struct fdset *pfdset, int fd);
+void fdset_del(struct fdset *pfdset, struct fdentry *pfdentry);
 
 int fdset_try_del(struct fdset *pfdset, int fd);
 
