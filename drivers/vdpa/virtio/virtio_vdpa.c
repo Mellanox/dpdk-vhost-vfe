@@ -516,7 +516,12 @@ virtio_vdpa_dev_notifier(void *arg)
 
 	ret = rte_vhost_host_notifier_ctrl(priv->vid, RTE_VHOST_QUEUE_ALL, true);
 	if (ret) {
-		priv->doorbell_relay = true;
+		ret = rte_atomic16_cmpset(&priv->doorbell_relay, VIRTIO_VDPA_DOOR_BELL_INIT,
+					VIRTIO_VDPA_DOOR_BELL_RELAY);
+		if (!ret) {
+			return NULL;
+		}
+
 		DRV_LOG(ERR, "%s vid %d dev notifier thread failed use relay ret:%d",
 			priv->vdev->device->name, priv->vid, ret);
 
@@ -539,8 +544,6 @@ virtio_vdpa_dev_notifier(void *arg)
 		virtio_pci_dev_queue_notify(priv->vpdev, i);
 		rte_vhost_vring_call(priv->vid, i);
 	}
-
-	priv->is_notify_thread_started = false;
 
 	return NULL;
 }
@@ -1258,7 +1261,7 @@ virtio_vdpa_dev_close_work(void *arg)
 	int ret;
 
 	DRV_LOG(INFO, "%s vfid %d dev close work of lcore:%d start", priv->vdev->device->name, priv->vf_id, priv->lcore_id);
-	if (priv->is_notify_thread_started && (!priv->doorbell_relay)) {
+	if (priv->is_notify_thread_started) {
 		ret = pthread_join(priv->notify_tid, &status);
 		if (ret) {
 			DRV_LOG(ERR, "failed to join terminated notify_ctrl thread: %s", rte_strerror(ret));
@@ -1431,10 +1434,11 @@ virtio_vdpa_dev_close(int vid)
 		ret = pthread_cancel(priv->notify_tid);
 		if (ret) {
 			DRV_LOG(ERR, "failed to cancel notify_ctrl thread: %s",rte_strerror(ret));
-			priv->is_notify_thread_started = false;
 		}
 
-		if ((!ret) && priv->doorbell_relay) {
+		ret = rte_atomic16_cmpset(&priv->doorbell_relay, VIRTIO_VDPA_DOOR_BELL_INIT,
+					VIRTIO_VDPA_DOOR_BELL_CANCLE);
+		if (!ret) {
 			ret = pthread_join(priv->notify_tid, &status);
 			if (ret) {
 				DRV_LOG(ERR, "failed to join terminated notify_ctrl thread: %s", rte_strerror(ret));
@@ -1627,7 +1631,7 @@ virtio_vdpa_dev_config(int vid)
 	DRV_LOG(INFO, "%s vfid %d launch all vq notifier thread",
 			priv->vdev->device->name, priv->vf_id);
 	priv->is_notify_thread_started = false;
-	priv->doorbell_relay = false;
+	priv->doorbell_relay = VIRTIO_VDPA_DOOR_BELL_INIT;
 	ret = pthread_create(&priv->notify_tid, NULL,virtio_vdpa_dev_notifier, priv);
 	if (ret) {
 		DRV_LOG(ERR, "%s vfid %d failed launch notifier thread ret:%d",
