@@ -2581,7 +2581,8 @@ vhost_user_set_status(struct virtio_net **pdev,
 		return RTE_VHOST_MSG_RESULT_ERR;
 
 	/* As per Virtio specification, the device status is 8bits long */
-	if (ctx->msg.payload.u64 > UINT8_MAX) {
+	if (!(dev->protocol_features & (1ULL << VHOST_USER_PROTOCOL_F_EXTEND_STATUS)) &&
+	    ctx->msg.payload.u64 > UINT8_MAX) {
 		VHOST_LOG_CONFIG(ERR, "(%s) invalid VHOST_USER_SET_STATUS payload 0x%" PRIx64 "\n",
 				dev->ifname, ctx->msg.payload.u64);
 		return RTE_VHOST_MSG_RESULT_ERR;
@@ -2601,7 +2602,7 @@ vhost_user_set_status(struct virtio_net **pdev,
 		dev->status &= ~VIRTIO_DEVICE_STATUS_FEATURES_OK;
 	}
 
-	VHOST_LOG_CONFIG(INFO, "(%s) new device status(0x%08x):\n", dev->ifname,
+	VHOST_LOG_CONFIG(INFO, "(%s) new device status(0x%08lx):\n", dev->ifname,
 			dev->status);
 	VHOST_LOG_CONFIG(INFO, "(%s)\t-RESET: %u\n", dev->ifname,
 			(dev->status == VIRTIO_DEVICE_STATUS_RESET));
@@ -2617,6 +2618,8 @@ vhost_user_set_status(struct virtio_net **pdev,
 			!!(dev->status & VIRTIO_DEVICE_STATUS_DEV_NEED_RESET));
 	VHOST_LOG_CONFIG(INFO, "(%s)\t-FAILED: %u\n", dev->ifname,
 			!!(dev->status & VIRTIO_DEVICE_STATUS_FAILED));
+	VHOST_LOG_CONFIG(INFO, "(%s)\t-NOTIFY_VQ0: %u\n", dev->ifname,
+			!!(dev->status & VIRTIO_DEVICE_STATUS_EXTEND_NOTIFY_VQ0));
 
 	return RTE_VHOST_MSG_RESULT_OK;
 }
@@ -3148,6 +3151,16 @@ rte_vhost_slave_config_change(int vid, bool need_reply)
 	return vhost_user_slave_config_change(dev, need_reply);
 }
 
+static bool vhost_user_vring_host_notifier_required(struct virtio_net *dev,
+						    int index)
+{
+	if ((dev->protocol_features & (1ULL << VHOST_USER_PROTOCOL_F_EXTEND_STATUS)) &&
+	    (dev->status & VIRTIO_DEVICE_STATUS_EXTEND_NOTIFY_VQ0))
+		return index == 0;
+
+	return true;
+}
+
 static int vhost_user_slave_set_vring_host_notifier(struct virtio_net *dev,
 						    int index, int fd,
 						    uint64_t offset,
@@ -3166,6 +3179,9 @@ static int vhost_user_slave_set_vring_host_notifier(struct virtio_net *dev,
 			},
 		},
 	};
+
+	if (!vhost_user_vring_host_notifier_required(dev, index))
+		return 0;
 
 	if (fd < 0)
 		ctx.msg.payload.area.u64 |= VHOST_USER_VRING_NOFD_MASK;
