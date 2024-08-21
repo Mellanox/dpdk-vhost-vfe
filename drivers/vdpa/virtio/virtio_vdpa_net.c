@@ -15,7 +15,8 @@
 				 (1ULL << VHOST_USER_PROTOCOL_F_MQ) | \
 				 (1ULL << VHOST_USER_PROTOCOL_F_LOG_SHMFD) | \
 				 (1ULL << VHOST_USER_PROTOCOL_F_REPLY_ACK) | \
-				 (1ULL << VHOST_USER_PROTOCOL_F_PRESETUP)) \
+				 (1ULL << VHOST_USER_PROTOCOL_F_PRESETUP) | \
+				 (1ULL << VHOST_USER_PROTOCOL_F_EXTEND_STATUS))
 
 extern int virtio_vdpa_logtype;
 #define NET_LOG(level, fmt, args...) \

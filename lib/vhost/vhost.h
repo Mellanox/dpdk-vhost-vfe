@@ -364,6 +364,8 @@ struct vhost_virtqueue {
 #define VIRTIO_DEVICE_STATUS_DEV_NEED_RESET	0x40
 #define VIRTIO_DEVICE_STATUS_FAILED		0x80
 
+#define VIRTIO_DEVICE_STATUS_EXTEND_NOTIFY_VQ0   0x100
+
 #define VIRTIO_DEVICE_PRESETUP_START    0x01
 #define VIRTIO_DEVICE_PRESETUP_END      0x02
 
@@ -514,7 +516,7 @@ struct virtio_net {
 	uint64_t		log_addr;
 	struct rte_ether_addr	mac;
 	uint16_t		mtu;
-	uint8_t			status;
+	uint64_t		status;
 
 	struct rte_vhost_device_ops const *notify_ops;
 
