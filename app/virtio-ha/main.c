@@ -1046,7 +1046,7 @@ err:
 
 
 static uint8_t *
-ha_server_mmap_common_cfg(int fd, struct virtio_pci_cap *cap)
+ha_server_mmap_common_cfg(int fd, struct virtio_pci_cap *cap, uint8_t **mmap_addr, uint64_t *mmap_len)
 {
 	struct vfio_region_info info;
 	int bar = (int)cap->bar;
@@ -1066,6 +1066,9 @@ ha_server_mmap_common_cfg(int fd, struct virtio_pci_cap *cap)
 		HA_APP_LOG(ERR, "Failed to mmap bar %d", bar);
 		return NULL;
 	}
+
+	*mmap_addr = addr;
+	*mmap_len = info.size;
 
 	return addr + cap->offset;
 }
@@ -1126,6 +1129,8 @@ ha_server_reset_all_pfs(void)
 	struct virtio_pci_cap cap;
 	int dev_fd, ret;
 	struct virtio_pci_common_cfg *common_cfg;
+	uint8_t *mmap_addr = NULL;
+	uint64_t mmap_len = 0;
 
 	TAILQ_FOREACH(dev, list, next) {
 		dev_fd = dev->pf_ctx.vfio_device_fd;
@@ -1161,7 +1166,8 @@ next:
 		if (ret < 0)
 			continue;
 
-		common_cfg = (struct virtio_pci_common_cfg *)ha_server_mmap_common_cfg(dev_fd, &cap);
+		common_cfg = (struct virtio_pci_common_cfg *)ha_server_mmap_common_cfg(dev_fd, &cap,
+				&mmap_addr, &mmap_len);
 		if (!common_cfg)
 			continue;
 
@@ -1170,6 +1176,7 @@ next:
 			HA_APP_LOG(INFO, "PF %s reset succeed", dev->pf_name.dev_bdf);
 		else
 			HA_APP_LOG(INFO, "PF %s reset fail", dev->pf_name.dev_bdf);
+		munmap(mmap_addr, mmap_len);
 	}
 
 	/* All PF reset completed, we could safely clean up DMA mapping */
