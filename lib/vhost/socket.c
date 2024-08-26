@@ -800,7 +800,10 @@ rte_vhost_driver_get_queue_num(const char *path, uint32_t *queue_num)
 		goto unlock_exit;
 	}
 
-	*queue_num = RTE_MIN((uint32_t)VHOST_MAX_QUEUE_PAIRS, vdpa_queue_num);
+	/* For blk, Q is not queue paire, max is VHOST_MAX_QUEUE_PAIRS*2, double
+	 * this to support 256q for blk
+	 */
+	*queue_num = RTE_MIN((uint32_t)VHOST_MAX_QUEUE_PAIRS * 2, vdpa_queue_num);
 
 unlock_exit:
 	pthread_mutex_unlock(&vhost_user.mutex);
