@@ -6,21 +6,9 @@ Build-Depends: debhelper (>= 10.3~),
                doxygen <!nodoc>,
                graphviz <!nodoc>,
                inkscape <!nodoc>,
-               libbsd-dev,
                libcap-dev,
-               libelf-dev,
-               libibverbs-dev (>= 16~),
-               libipsec-mb-dev [amd64],
-               libjansson-dev,
-               libmnl-dev,
                libnuma-dev,
                libpcap-dev,
-               libssl-dev,
-               linux-headers-686 [i386] | linux-headers-generic [i386],
-               linux-headers-amd64 [amd64] | linux-headers-generic [amd64],
-               linux-headers-arm64 [arm64] | linux-headers-generic [arm64],
-               linux-headers-armmp [armhf] | linux-headers-generic [armhf],
-               linux-headers-powerpc64le [ppc64el] | linux-headers-generic [ppc64el],
                meson (>= 0.41~),
                pkg-config,
                python3,
@@ -30,6 +18,7 @@ Build-Depends: debhelper (>= 10.3~),
                texlive-latex-extra <!nodoc>,
                zlib1g-dev,
                libev-dev,
+               uuid-dev,
 Standards-Version: 4.2.1
 Rules-Requires-Root: no
 Section: libs
@@ -37,20 +26,14 @@ Homepage: https://github.com/Mellanox/dpdk-vhost-vfe
 
 Package: dpdk-vhost-vfe
 Section: admin
-Architecture: amd64 arm64 armhf i386 ppc64el
+Architecture: amd64
 Depends: hwdata,
          lsb-base (>= 3.2-14),
          pciutils,
-         libev-dev,
          ${misc:Depends},
          ${python3:Depends},
          ${shlibs:Depends},
 Recommends: python3-pyelftools,
-Suggests: dpdk-vhost-vfe-doc,
-          linux-image-generic,
 Description: dpdk-vhost-vfe (runtime)
- DPDK is a set of libraries for fast packet processing. Applications run
- in user-space and communicate directly with dedicated network interfaces.
- .
  This package contains the runtime dpdk-vhost-vfe applications based on
  DPDK.
