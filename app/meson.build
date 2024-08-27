@@ -2,22 +2,6 @@
 # Copyright(c) 2017-2019 Intel Corporation
 
 apps = [
-        'dumpcap',
-        'pdump',
-        'proc-info',
-        'test-acl',
-        'test-bbdev',
-        'test-cmdline',
-        'test-compress-perf',
-        'test-crypto-perf',
-        'test-eventdev',
-        'test-fib',
-        'test-flow-perf',
-        'test-gpudev',
-        'test-pipeline',
-        'test-pmd',
-        'test-regex',
-        'test-sad',
         'vfe-vdpa',
         'virtio-ha',
 ]
