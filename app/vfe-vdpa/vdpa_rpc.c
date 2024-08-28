@@ -330,6 +330,7 @@ static cJSON *vdpa_vf_dev_list(const char *pf_name)
 			MAX_VDPA_SAMPLE_PORTS);
 	if (max_vf_num <= 0) {
 		virtio_ha_dev_unlock();
+		rte_free(vf_info);
 		return vdpa_rpc_format_errno(result, max_vf_num);
 	}
 	if (max_vf_num > MAX_VDPA_SAMPLE_PORTS) {
