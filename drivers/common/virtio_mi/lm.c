@@ -314,7 +314,7 @@ virtio_vdpa_send_admin_command(struct virtadmin_ctl *avq,
 	return ctrl->status;
 }
 
-static void virtio_vdpa_free_desc_check(struct virtadmin_ctl *avq, uint16_t free_cnt)
+static void virtio_vdpa_free_desc_check(struct virtadmin_ctl *avq, uint16_t free_cnt, uint16_t vdev_id)
 {
 	struct virtqueue *vq;
 	struct timeval start;
@@ -330,9 +330,9 @@ static void virtio_vdpa_free_desc_check(struct virtadmin_ctl *avq, uint16_t free
 			avq->virtio_admin_hdr_mem = avq->virtio_admin_hdr_mem_base +
 						vq->vq_desc_head_idx * ADMIN_CMD_HDR_MAX_SIZE;
 			gettimeofday(&start, NULL);
-			DRV_LOG(INFO, "vq->vq_desc_head_idx = %d, vq_free_cnt = %d, "
+			DRV_LOG(INFO, "vq->vq_desc_head_idx = %d, vq_free_cnt = %d, vdev_id=%d "
 				"vq->hw->avq = %p vq = %p hdr=0x%lx time:%lu.%06lu",
-				vq->vq_desc_head_idx, vq->vq_free_cnt, avq, vq,
+				vq->vq_desc_head_idx, vq->vq_free_cnt, vdev_id, avq, vq,
 				avq->virtio_admin_hdr_mem, start.tv_sec, start.tv_usec);
 			break;
 		}
@@ -359,7 +359,7 @@ virtio_vdpa_cmd_identity(struct virtio_vdpa_pf_priv *priv,
 
 	rte_spinlock_lock(&hw->avq->lock);
 
-	virtio_vdpa_free_desc_check(hw->avq, 3);
+	virtio_vdpa_free_desc_check(hw->avq, 3, -1);
 
 	ctrl = virtnet_get_aq_hdr_addr(hw->avq);
 	ctrl->hdr.class = VIRTIO_ADMIN_PCI_MIGRATION_CTRL;
@@ -410,7 +410,7 @@ virtio_vdpa_cmd_get_status(struct virtio_vdpa_pf_priv *priv, uint16_t vdev_id,
 	}
 
 	rte_spinlock_lock(&hw->avq->lock);
-	virtio_vdpa_free_desc_check(hw->avq, 4);
+	virtio_vdpa_free_desc_check(hw->avq, 4, vdev_id);
 
 	ctrl = virtnet_get_aq_hdr_addr(hw->avq);
 	ctrl->hdr.class = VIRTIO_ADMIN_PCI_MIGRATION_CTRL;
@@ -462,7 +462,7 @@ virtio_vdpa_cmd_set_status(struct virtio_vdpa_pf_priv *priv, uint16_t vdev_id,
 	}
 
 	rte_spinlock_lock(&hw->avq->lock);
-	virtio_vdpa_free_desc_check(hw->avq, 3);
+	virtio_vdpa_free_desc_check(hw->avq, 3, vdev_id);
 
 	ctrl = virtnet_get_aq_hdr_addr(hw->avq);
 	ctrl->hdr.class = VIRTIO_ADMIN_PCI_MIGRATION_CTRL;
@@ -507,7 +507,7 @@ virtio_vdpa_cmd_save_state(struct virtio_vdpa_pf_priv *priv,
 	}
 
 	rte_spinlock_lock(&hw->avq->lock);
-	virtio_vdpa_free_desc_check(hw->avq, 4);
+	virtio_vdpa_free_desc_check(hw->avq, 4, vdev_id);
 
 	ctrl = virtnet_get_aq_hdr_addr(hw->avq);
 	ctrl->hdr.class = VIRTIO_ADMIN_PCI_MIGRATION_CTRL;
@@ -554,7 +554,7 @@ virtio_vdpa_cmd_restore_state(struct virtio_vdpa_pf_priv *priv,
 	}
 
 	rte_spinlock_lock(&hw->avq->lock);
-	virtio_vdpa_free_desc_check(hw->avq, 4);
+	virtio_vdpa_free_desc_check(hw->avq, 4, vdev_id);
 
 	ctrl = virtnet_get_aq_hdr_addr(hw->avq);
 	ctrl->hdr.class = VIRTIO_ADMIN_PCI_MIGRATION_CTRL;
@@ -602,7 +602,7 @@ virtio_vdpa_cmd_get_internal_pending_bytes(struct virtio_vdpa_pf_priv *priv,
 	}
 
 	rte_spinlock_lock(&hw->avq->lock);
-	virtio_vdpa_free_desc_check(hw->avq, 4);
+	virtio_vdpa_free_desc_check(hw->avq, 4, vdev_id);
 
 	ctrl = virtnet_get_aq_hdr_addr(hw->avq);
 	ctrl->hdr.class = VIRTIO_ADMIN_PCI_MIGRATION_CTRL;
@@ -653,7 +653,7 @@ virtio_vdpa_cmd_dirty_page_identity(struct virtio_vdpa_pf_priv *priv,
 	}
 
 	rte_spinlock_lock(&hw->avq->lock);
-	virtio_vdpa_free_desc_check(hw->avq, 3);
+	virtio_vdpa_free_desc_check(hw->avq, 3, -1);
 
 	ctrl = virtnet_get_aq_hdr_addr(hw->avq);
 	ctrl->hdr.class = VIRTIO_ADMIN_PCI_DIRTY_PAGE_TRACK_CTRL;
@@ -713,7 +713,7 @@ virtio_vdpa_cmd_dirty_page_start_track(struct virtio_vdpa_pf_priv *priv,
 	}
 
 	rte_spinlock_lock(&hw->avq->lock);
-	virtio_vdpa_free_desc_check(hw->avq, 3);
+	virtio_vdpa_free_desc_check(hw->avq, 3, vdev_id);
 
 	ctrl = virtnet_get_aq_hdr_addr(hw->avq);
 	ctrl->hdr.class = VIRTIO_ADMIN_PCI_DIRTY_PAGE_TRACK_CTRL;
@@ -765,7 +765,7 @@ virtio_vdpa_cmd_dirty_page_stop_track(struct virtio_vdpa_pf_priv *priv,
 	}
 
 	rte_spinlock_lock(&hw->avq->lock);
-	virtio_vdpa_free_desc_check(hw->avq, 3);
+	virtio_vdpa_free_desc_check(hw->avq, 3, vdev_id);
 
 	ctrl = virtnet_get_aq_hdr_addr(hw->avq);
 	ctrl->hdr.class = VIRTIO_ADMIN_PCI_DIRTY_PAGE_TRACK_CTRL;
@@ -813,7 +813,7 @@ virtio_vdpa_cmd_dirty_page_get_map_pending_bytes(
 	}
 
 	rte_spinlock_lock(&hw->avq->lock);
-	virtio_vdpa_free_desc_check(hw->avq, 4);
+	virtio_vdpa_free_desc_check(hw->avq, 4, vdev_id);
 
 	ctrl = virtnet_get_aq_hdr_addr(hw->avq);
 	ctrl->hdr.class = VIRTIO_ADMIN_PCI_DIRTY_PAGE_TRACK_CTRL;
@@ -869,7 +869,7 @@ virtio_vdpa_cmd_dirty_page_report_map(struct virtio_vdpa_pf_priv *priv,
 	}
 
 	rte_spinlock_lock(&hw->avq->lock);
-	virtio_vdpa_free_desc_check(hw->avq, 4);
+	virtio_vdpa_free_desc_check(hw->avq, 4, vdev_id);
 
 	ctrl = virtnet_get_aq_hdr_addr(hw->avq);
 	ctrl->hdr.class = VIRTIO_ADMIN_PCI_DIRTY_PAGE_TRACK_CTRL;
