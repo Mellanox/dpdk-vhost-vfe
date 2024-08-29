@@ -114,7 +114,7 @@ virtio_vdpa_cmd_free_desc(struct virtio_hw *hw,uint16_t idx)
 	rte_spinlock_unlock(&hw->avq->lock);
 
 	gettimeofday(&start, NULL);
-	DRV_LOG(DEBUG, "vq->vq_free_cnt=%d\nvq->vq_desc_head_idx=%d time:%lu.%06lu",
+	DRV_LOG(INFO, "vq->vq_free_cnt=%d\nvq->vq_desc_head_idx=%d time:%lu.%06lu",
 		vq->vq_free_cnt, vq->vq_desc_head_idx, start.tv_sec, start.tv_usec);
 
 }
@@ -330,7 +330,7 @@ static void virtio_vdpa_free_desc_check(struct virtadmin_ctl *avq, uint16_t free
 			avq->virtio_admin_hdr_mem = avq->virtio_admin_hdr_mem_base +
 						vq->vq_desc_head_idx * ADMIN_CMD_HDR_MAX_SIZE;
 			gettimeofday(&start, NULL);
-			DRV_LOG(DEBUG, "vq->vq_desc_head_idx = %d, vq_free_cnt = %d, "
+			DRV_LOG(INFO, "vq->vq_desc_head_idx = %d, vq_free_cnt = %d, "
 				"vq->hw->avq = %p vq = %p hdr=0x%lx time:%lu.%06lu",
 				vq->vq_desc_head_idx, vq->vq_free_cnt, avq, vq,
 				avq->virtio_admin_hdr_mem, start.tv_sec, start.tv_usec);
