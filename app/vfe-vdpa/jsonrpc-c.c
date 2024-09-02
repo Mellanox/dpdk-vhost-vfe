@@ -261,7 +261,6 @@ int jrpc_server_init(struct jrpc_server *server, int port_number)
 int jrpc_server_init_with_ev_loop(struct jrpc_server *server,
 	int port_number, struct ev_loop *loop)
 {
-	memset(server, 0, sizeof(struct jrpc_server));
 	server->loop = loop;
 	server->port_number = port_number;
 	char *debug_level_env = getenv("JRPC_DEBUG");
@@ -289,7 +288,7 @@ static int __jrpc_server_start(struct jrpc_server *server)
 	hints.ai_socktype = SOCK_STREAM;
 	hints.ai_flags = AI_PASSIVE; /* use my IP */
 
-	rv = getaddrinfo("localhost", PORT, &hints, &servinfo);
+	rv = getaddrinfo(server->ip, PORT, &hints, &servinfo);
 	if (rv) {
 		fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));
 		return 1;

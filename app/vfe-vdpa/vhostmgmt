@@ -183,7 +183,6 @@ def version(args):
     print(json.dumps(result, indent=2))
 
 def main():
-    server_addr='127.0.0.1'
     server_port='12190'
     timeout=125.0
 
@@ -191,6 +190,9 @@ def main():
         description='Nvidia vhostd-rpc command line interface ' + __version__)
     subparsers = parser.add_subparsers(help='** Use -h for sub-command usage',
                                        dest='called_rpc_name')
+
+    parser.add_argument('-s', '--serverip', action='store', dest='serverip',
+                        default='127.0.0.1', help="server ip to connect to")
 
     # version
     p = subparsers.add_parser('version', help='show vhostd version info')
@@ -293,7 +295,7 @@ def main():
                 print("Error: invalid action.")
                 parser.print_usage()
                 sys.exit(1)
-    args.client = JsonRpcVirtnetClient(server_addr, server_port, timeout)
+    args.client = JsonRpcVirtnetClient(args.serverip, server_port, timeout)
     if hasattr(args, 'func'):
         try:
             call_rpc_func(args)
