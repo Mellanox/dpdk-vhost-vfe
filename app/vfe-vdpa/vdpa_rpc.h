@@ -14,6 +14,8 @@
 #include "jsonrpc-c.h"
 
 #define MAX_IF_PATH_LEN 120
+#define MAX_SERVERIP_LEN 100
+
 /* VDPA RPC */
 #define VIRTNET_FEATURE_SZ	64
 #define MAX_VDPA_SAMPLE_PORTS 2048

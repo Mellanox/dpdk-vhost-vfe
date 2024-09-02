@@ -50,6 +50,7 @@ struct vdpa_port {
 static struct vdpa_port vports[MAX_VDPA_SAMPLE_PORTS];
 
 static char iface[MAX_IF_PATH_LEN];
+static char serverip[MAX_SERVERIP_LEN];
 static int devcnt;
 static int interactive;
 static int client_mode;
@@ -79,7 +80,8 @@ vdpa_usage(const char *prgname)
 				 "	--interactive|-i: run in interactive mode.\n"
 				 "	--iface <path>: specify the path prefix of the socket files, e.g. /tmp/vhost-user-.\n"
 				 "	--client: register a vhost-user socket as client mode.\n"
-				 "	--stage1: fall back to stage1.\n",
+				 "	--stage1: fall back to stage1.\n"
+				 "	--serverip <ip>: specify ip or server name RPC service listen on.\n",
 				 prgname);
 }
 
@@ -92,6 +94,7 @@ parse_args(int argc, char **argv)
 		{"interactive", no_argument, &interactive, 1},
 		{"client", no_argument, &client_mode, 1},
 		{"stage1", no_argument, &stage1, 1},
+		{"serverip", required_argument, NULL, 0},
 		{NULL, 0, 0, 0},
 	};
 	int opt, idx;
@@ -113,6 +116,14 @@ parse_args(int argc, char **argv)
 					return -1;
 				}
 				printf("iface %s\n", iface);
+			}
+			if (strncmp(long_option[idx].name, "serverip",
+						MAX_SERVERIP_LEN) == 0) {
+				if (rte_strscpy(serverip, optarg, MAX_SERVERIP_LEN) < 0) {
+					printf("Invalid serverip length \n");
+					return -1;
+				}
+				printf("serverip %s\n", serverip);
 			}
 			if (!strcmp(long_option[idx].name, "interactive")) {
 				printf("Interactive-mode selected\n");
@@ -785,7 +796,8 @@ main(int argc, char *argv[])
 	ret = virtio_ha_client_dev_restore_pf(&total_vf);
 	if (ret < 0)
 		rte_exit(EXIT_FAILURE, "ha client dev restore pf failed\n");
-	
+
+	vdpa_rpc_ctx.rpc_server.ip = (serverip[0] == '\0' ? "localhost" : serverip);
 	ret = vdpa_rpc_start(&vdpa_rpc_ctx);
 	if (ret < 0)
 		rte_exit(EXIT_FAILURE, "rpc init failed\n");

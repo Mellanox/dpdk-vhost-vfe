@@ -52,6 +52,7 @@ struct jrpc_server {
 	int procedure_count;
 	struct jrpc_procedure *procedures;
 	int debug_level;
+	const char *ip;
 };
 
 struct jrpc_connection {
