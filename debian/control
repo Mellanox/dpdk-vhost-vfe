@@ -26,7 +26,7 @@ Homepage: https://github.com/Mellanox/dpdk-vhost-vfe
 
 Package: dpdk-vhost-vfe
 Section: admin
-Architecture: amd64
+Architecture: amd64 arm64
 Depends: hwdata,
          lsb-base (>= 3.2-14),
          pciutils,
