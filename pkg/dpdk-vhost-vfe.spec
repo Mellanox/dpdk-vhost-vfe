@@ -15,7 +15,7 @@ Summary: Vhost Acceleration for VirtIO VF PCI devices
 Group: System Environment/Libraries
 License: BSD-3-Clause AND GPL-2.0-only AND LGPL-2.1-only
 
-ExclusiveArch: x86_64
+ExclusiveArch: x86_64 aarch64
 
 %global dst_prefix /opt/mellanox/dpdk-vhost-vfe
 %global dst_lib lib64
