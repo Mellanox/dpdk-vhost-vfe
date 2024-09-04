@@ -163,11 +163,14 @@ virtio_vdpa_mi_poll(void *arg)
 				& (vq->vq_nentries - 1));
 		uep = &vq->vq_split.ring.used->ring[used_idx];
 		idx = (uint32_t) uep->id;
+		rte_io_rmb();
 		if (!avq->desc_list[idx].in_use) {
 			DRV_LOG(ERR, "desc:%d is not head", idx);
 		}
 		vq->vq_used_cons_idx++;
 		avq->desc_list[idx].in_use = false;
+		/* in_use should be fenced to let other thread see */
+		rte_smp_wmb();
 		sem_post(&avq->desc_list[idx].wait_sem);
 	}
 
@@ -255,9 +258,9 @@ virtio_vdpa_send_admin_command_split(struct virtadmin_ctl *avq,
 
 	vq->vq_desc_head_idx = vq->vq_split.ring.desc[i].next;
 
+	avq->desc_list[head].in_use = true;
 	vq_update_avail_ring(vq, head);
 	vq_update_avail_idx(vq);
-	avq->desc_list[head].in_use = true;
 
 	virtqueue_notify(vq);
 	rte_spinlock_unlock(&avq->lock);
