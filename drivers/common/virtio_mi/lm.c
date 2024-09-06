@@ -114,8 +114,8 @@ virtio_vdpa_cmd_free_desc(struct virtio_hw *hw,uint16_t idx)
 	rte_spinlock_unlock(&hw->avq->lock);
 
 	gettimeofday(&start, NULL);
-	DRV_LOG(INFO, "vq->vq_free_cnt=%d\nvq->vq_desc_head_idx=%d time:%lu.%06lu",
-		vq->vq_free_cnt, vq->vq_desc_head_idx, start.tv_sec, start.tv_usec);
+	DRV_LOG(INFO, "vq->vq_free_cnt=%d vq->vq_desc_head_idx=%d avq:%p time:%lu.%06lu",
+		vq->vq_free_cnt, vq->vq_desc_head_idx, hw->avq, start.tv_sec, start.tv_usec);
 
 }
 
@@ -165,7 +165,7 @@ virtio_vdpa_mi_poll(void *arg)
 		idx = (uint32_t) uep->id;
 		rte_io_rmb();
 		if (!avq->desc_list[idx].in_use) {
-			DRV_LOG(ERR, "desc:%d is not head", idx);
+			DRV_LOG(ERR, "desc:%d is not head, avq:%p", idx, avq);
 		}
 		vq->vq_used_cons_idx++;
 		avq->desc_list[idx].in_use = false;
@@ -298,7 +298,7 @@ virtio_vdpa_send_admin_command(struct virtadmin_ctl *avq,
 		if (i >= VIRTIO_ADMIN_CMD_RETRY_CNT)
 			break;
 		if(ctrl->status && (!(ctrl->status & VIRTIO_ADMIN_CMD_STATUS_DNR_BIT))) {
-			DRV_LOG(INFO, "No:%d cmd status:0x%x, submit again after 1s", i, ctrl->status);
+			DRV_LOG(INFO, "No:%d cmd status:0x%x, head:%d avq:%p submit again after 1s", i, ctrl->status, *head, avq);
 			usleep(1000000);
 			/* Kick again */
 			rte_spinlock_lock(&avq->lock);
