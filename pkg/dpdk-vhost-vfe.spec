@@ -5,7 +5,7 @@
 %define __arch_install_post QA_SKIP_RPATHS=2
 
 Name: dpdk-vhost-vfe
-Version: 24.10.0.rc1
+Version: 24.10.0.rc2
 Release: 1%{?dist}
 Packager: dev@dpdk.org
 URL: https://github.com/Mellanox/dpdk-vhost-vfe
