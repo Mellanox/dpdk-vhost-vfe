@@ -9,6 +9,11 @@ struct virtio_vdpa_pf_priv;
 
 struct virtio_vdpa_pf_info {
 	char pf_name[RTE_DEV_NAME_MAX_LEN];
+	uint64_t aq_desc;
+	uint64_t aq_avail;
+	uint64_t aq_used;
+	uint16_t aq_avail_idx;
+	uint16_t aq_used_idx;
 };
 
 __rte_internal int

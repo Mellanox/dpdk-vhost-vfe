@@ -1464,10 +1464,23 @@ rte_vdpa_get_pf_list(struct virtio_vdpa_pf_info *pf_info, int max_pf_num)
 {
 	struct virtio_vdpa_pf_info *info = pf_info;
 	struct virtio_vdpa_pf_priv *priv;
+	struct virtio_hw *hw;
+	struct virtadmin_ctl *avq;
+	struct virtqueue *vq;
 	int count = 0;
 
 	pthread_mutex_lock(&mi_priv_list_lock);
 	TAILQ_FOREACH(priv, &virtio_mi_priv_list, next) {
+		hw = &priv->vpdev->hw;
+		avq = hw->avq;
+		if (avq) {
+			vq = virtnet_aq_to_vq(hw->avq);
+			info->aq_desc = (uint64_t)vq->vq_split.ring.desc;
+			info->aq_avail = (uint64_t)vq->vq_split.ring.avail;
+			info->aq_used =  (uint64_t)vq->vq_split.ring.used;
+			info->aq_avail_idx =  vq->vq_split.ring.avail->idx;
+			info->aq_used_idx =  vq->vq_split.ring.used->idx;
+		}
 		rte_pci_device_name(&priv->pdev->addr, info->pf_name,
 				sizeof(info->pf_name));
 		count++;
