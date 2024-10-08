@@ -139,6 +139,8 @@ def mgmtpf(args):
         params['dev'] = args.device
     if args.list_pf:
         params['list'] = args.list_pf
+        if args.debug_list_pf:
+            params['debug'] = args.debug_list_pf
 
     result = args.client.call('mgmtpf', params)
     print(json.dumps(result, indent=2))
@@ -204,6 +206,7 @@ def main():
     group.add_argument('-a', '--add', action='store_true', dest='add_pf', help="add a pci device")
     group.add_argument('-r', '--remove', action='store_true', dest='remove_pf', help="remove a pci device")
     group.add_argument('-l', '--list', action='store_true',  dest='list_pf', help="list all PF devices")
+    p.add_argument('-d', '--debug', action='store_true', dest='debug_list_pf', help="with debug info")
     p.add_argument(
         'device',
         metavar='DEVICE',

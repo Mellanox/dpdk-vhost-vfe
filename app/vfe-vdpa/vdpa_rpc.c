@@ -137,7 +137,7 @@ static cJSON *vdpa_pf_dev_remove(const char *pf_name)
 	return vdpa_rpc_format_errno(result, ret);
 }
 
-static cJSON *vdpa_pf_dev_list(void)
+static cJSON *vdpa_pf_dev_list(bool debug)
 {
 	cJSON *result = cJSON_CreateObject();
 	cJSON *devices = cJSON_CreateArray();
@@ -161,6 +161,13 @@ static cJSON *vdpa_pf_dev_list(void)
 	for (i = 0; i < max_pf_num; i++) {
 		device = cJSON_CreateObject();
 		cJSON_AddStringToObject(device, "pf", pf_info[i].pf_name);
+		if (debug) {
+			JSON_STR_NUM_TO_OBJ(device, "aq_desc", "0x%lx", pf_info[i].aq_desc);
+			JSON_STR_NUM_TO_OBJ(device, "aq_avail", "0x%lx", pf_info[i].aq_avail);
+			JSON_STR_NUM_TO_OBJ(device, "aq_used", "0x%lx", pf_info[i].aq_used);
+			JSON_STR_NUM_TO_OBJ(device, "aq_avail_idx", "%d", pf_info[i].aq_avail_idx);
+			JSON_STR_NUM_TO_OBJ(device, "aq_used_idx", "%d", pf_info[i].aq_used_idx);
+		}
 		cJSON_AddItemToArray(devices, device);
 	}
 	cJSON_AddItemToObject(result, "devices", devices);
@@ -174,6 +181,7 @@ static cJSON *mgmtpf(jrpc_context *ctx, cJSON *params, cJSON *id)
 	cJSON *pf_remove = cJSON_GetObjectItem(params, "remove");
 	cJSON *pf_list = cJSON_GetObjectItem(params, "list");
 	cJSON *pf_dev = cJSON_GetObjectItem(params, "dev");
+	cJSON *debug = cJSON_GetObjectItem(params, "debug");
 	cJSON *result = NULL;
 	struct vdpa_rpc_context *rpc_ctx;
 	uint64_t t_start = rte_rdtsc_precise();
@@ -188,7 +196,7 @@ static cJSON *mgmtpf(jrpc_context *ctx, cJSON *params, cJSON *id)
 		/* Parse PCI device name*/
 		result = vdpa_pf_dev_remove(pf_dev->valuestring);
 	} else if (pf_list) {
-		result = vdpa_pf_dev_list();
+		result = vdpa_pf_dev_list(!!debug);
 	}
 	if (!result) {
 		result = cJSON_CreateObject();
