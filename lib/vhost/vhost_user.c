@@ -2055,6 +2055,8 @@ vhost_user_get_vring_base(struct virtio_net **pdev,
 
 	vring_invalidate(dev, vq);
 
+	memset(&vq->ring_addrs, 0, sizeof(vq->ring_addrs));
+
 	return RTE_VHOST_MSG_RESULT_REPLY;
 }
 
