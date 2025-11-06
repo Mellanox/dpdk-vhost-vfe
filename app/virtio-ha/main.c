@@ -989,6 +989,9 @@ monitor_vhostfd_thread(void *arg)
 		}
 	}
 
+	if (nr_vhost == 0)
+		goto err;
+
 	evs = malloc(nr_vhost * sizeof(struct epoll_event));
 	if (!evs) {
 		HA_APP_LOG(ERR, "Failed to alloc epoll events");
@@ -1007,6 +1010,11 @@ monitor_vhostfd_thread(void *arg)
 
 	while (1) {
 		nev = epoll_wait(epfd, evs, nr_vhost, -1);
+		if (nev == -1) {
+			HA_APP_LOG(ERR, "Failed to epoll wait, errno:%d", errno);
+			goto exit;
+		}
+
 		for (i = 0; i < nev; i++) {
 			vf_dev = (struct virtio_ha_vf_dev *)evs[i].data.ptr;
 			pthread_mutex_lock(&prio_chnl_mutex);
